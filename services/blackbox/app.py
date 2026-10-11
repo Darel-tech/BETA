@@ -1,244 +1,233 @@
-"""
-FastAPI service skeleton for the Black-Box Hallucination Detector (BETA).
+"""FastAPI service for the black-box hallucination detector.
 
-This module handles API routing, request validation, and response serialization.
-All detector logic (semantic entropy, entailment checking, and decision logic)
-lives in separate modules and will be integrated here modularly:
-  - resample_entropy.py (Technique 1: Consistency across resamples)
-  - entailment_check.py (Technique 2: Claim vs. retrieved facts)
-  - decision_logic.py   (Verdict and confidence resolution)
+Run from the repository root::
+
+    uvicorn services.blackbox.app:app --port 8000
+
+Importing this module does not download models or call any network service;
+the detector and its models are created lazily on the first request.
 """
 
+import logging
+import os
+import threading
 import time
-from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from . import __version__
+from .decision_logic import Verdict
+from .detector import Detector
+from .entailment_check import DEFAULT_NLI_MODEL, MAX_FACTS, MAX_TEXT_CHARS
+from .errors import (
+    BlackBoxError,
+    ConfigurationError,
+    InputValidationError,
+    ModelError,
+    ProviderError,
+)
+from .resample_entropy import DEFAULT_EMBEDDING_MODEL
 
-# ==============================================================================
-# Enums and Schemas
-# ==============================================================================
+logger = logging.getLogger(__name__)
 
-class VerdictEnum(str, Enum):
-    """Allowed verdicts as defined in ARCHITECTURE_esha_blackbox.md §3."""
-    TRUSTWORTHY = "trustworthy"
-    UNCERTAIN = "uncertain"
-    NEEDS_CORRECTION = "needs_correction"
-
-
-class SourceEnum(str, Enum):
-    """Permitted source models for the blackbox service."""
-    CHATGPT = "chatgpt"
-    CLAUDE = "claude"
+MAX_ENTITIES = 100
 
 
 class DetectRequest(BaseModel):
-    """
-    Request model for black-box hallucination detection.
-    
-    Compatible with ARCHITECTURE_esha_blackbox.md contract while providing
-    extensibility for user question/prompt and pre-retrieved facts.
-    """
-    text: str = Field(
-        ...,
-        description="The AI-generated answer to check for hallucinations.",
-        examples=["Paris is the capital of France."]
-    )
-    source: str = Field(
-        ...,
-        description="The source model producing the text ('chatgpt' or 'claude').",
-        examples=["chatgpt"]
+    """Request body for ``POST /detect`` and ``POST /v1/check``."""
+
+    text: str = Field(..., description="The answer or claim to evaluate.", max_length=MAX_TEXT_CHARS)
+    source: Literal["chatgpt", "claude"] = Field(
+        ..., description="Which LLM produced the text; selects the resampling provider."
     )
     question: Optional[str] = Field(
-        default=None,
-        description="The original user question or prompt (used for consistency resampling).",
-        examples=["What is the capital of France?"]
+        None,
+        description="Original question. Enables response-consistency analysis; "
+        "if omitted, resampling is skipped.",
+        max_length=8000,
     )
     entities: Optional[List[str]] = Field(
-        default_factory=list,
-        description="Optional list of entity strings mentioned in the answer."
+        None,
+        description="Optional entity names. Accepted for contract compatibility; "
+        "not used in scoring.",
+        max_length=MAX_ENTITIES,
     )
     reference_facts: Optional[List[str]] = Field(
-        default=None,
-        description="Optional list of retrieved reference facts for entailment verification."
+        None,
+        description="Optional reference facts to check the text against. Blank "
+        "entries are dropped; if none remain, fact verification is unavailable.",
+        max_length=MAX_FACTS,
     )
 
     @field_validator("text")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("Field 'text' must not be empty or blank.")
-        return value.strip()
+    def _text_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("text must not be blank")
+        return value
 
-    @field_validator("source")
+    @field_validator("question")
     @classmethod
-    def validate_source(cls, value: str) -> str:
-        normalized = value.strip().lower()
-        valid_sources = {s.value for s in SourceEnum}
-        if normalized not in valid_sources:
-            raise ValueError(
-                f"Invalid source '{value}'. Allowed sources are: {sorted(list(valid_sources))}."
-            )
-        return normalized
+    def _question_blank_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("entities")
+    @classmethod
+    def _clean_entities(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        cleaned = [v.strip() for v in value if v.strip()]
+        return cleaned or None
+
+    @field_validator("reference_facts")
+    @classmethod
+    def _clean_facts(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        cleaned = [v.strip() for v in value if v.strip()]
+        for fact in cleaned:
+            if len(fact) > MAX_TEXT_CHARS:
+                raise ValueError(f"each reference fact must be at most {MAX_TEXT_CHARS} characters")
+        return cleaned or None
 
 
 class DetectResponse(BaseModel):
-    """
-    Response model matching the shared contract in ARCHITECTURE_esha_blackbox.md §3.
-    """
-    verdict: VerdictEnum = Field(
-        ...,
-        description="Final detection verdict: trustworthy, uncertain, or needs_correction."
-    )
+    """Response body for the detection endpoints."""
+
+    verdict: Verdict
     confidence: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Confidence score between 0.0 and 1.0."
+        ..., ge=0.0, le=1.0, description="Heuristic strength of the verdict; NOT a calibrated probability."
     )
-    evidence: List[str] = Field(
-        default_factory=list,
-        description="Human-readable strings explaining the verdict."
-    )
-    latency_ms: float = Field(
-        ...,
-        description="Execution latency in milliseconds for the detection stage."
+    evidence: List[str]
+    latency_ms: float
+    signals: Dict[str, Any] = Field(
+        default_factory=dict, description="Underlying signal values used by the decision rules."
     )
 
 
-class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str = "ok"
-    service: str = "blackbox-detector"
-    version: str = "0.1.0"
-
-
-# ==============================================================================
-# FastAPI Application Initialization
-# ==============================================================================
-
-app = FastAPI(
-    title="BETA Black-Box Hallucination Detector",
-    description="FastAPI service detecting hallucinations in closed LLM outputs (ChatGPT, Claude).",
-    version="0.1.0"
+_STATUS_BY_ERROR = (
+    (InputValidationError, 422),
+    (ConfigurationError, 503),
+    (ModelError, 503),
+    (ProviderError, 502),
 )
 
 
-# ==============================================================================
-# Exception Handlers
-# ==============================================================================
+def _status_for(exc: BlackBoxError) -> int:
+    for error_type, status in _STATUS_BY_ERROR:
+        if isinstance(exc, error_type):
+            return status
+    return 500
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
+
+def get_detector(request: Request) -> Detector:
+    """FastAPI dependency returning the (lazily created) shared detector."""
+    state = request.app.state
+    if state.detector is None:
+        with state.detector_lock:
+            if state.detector is None:
+                state.detector = Detector()
+    return state.detector
+
+
+def create_app(detector: Optional[Detector] = None) -> FastAPI:
+    """Application factory.
+
+    Args:
+        detector: Optional pre-built detector (used by tests). When omitted a
+            default :class:`Detector` is built on the first request.
     """
-    Handles request validation errors.
-    
-    As specified in ARCHITECTURE_esha_blackbox.md §3, an invalid or missing 'source'
-    must return a 400 Bad Request rather than default 422.
-    """
-    for error in exc.errors():
-        loc = error.get("loc", ())
-        if "source" in loc:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"detail": error.get("msg", "Invalid source specified.")}
+    app = FastAPI(
+        title="Hallucination Firewall - Black-Box Detector",
+        version=__version__,
+        description=(
+            "Combines response-consistency resampling with NLI entailment "
+            "against supplied reference facts. Outputs are heuristic signals, "
+            "not proof of factual truth."
+        ),
+    )
+    app.state.detector = detector
+    app.state.detector_lock = threading.Lock()
+
+    @app.exception_handler(BlackBoxError)
+    async def _blackbox_error_handler(_: Request, exc: BlackBoxError) -> JSONResponse:
+        return JSONResponse(
+            status_code=_status_for(exc),
+            content={"detail": {"error": exc.code, "message": str(exc)}},
+        )
+
+    @app.get("/health")
+    async def health() -> Dict[str, Any]:
+        """Service health. Does not load models or contact providers."""
+        return {
+            "status": "ok",
+            "service": "blackbox-detector",
+            "version": __version__,
+            "providers_configured": {
+                "openai": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
+                "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+            },
+            "models": {
+                "embedding": os.environ.get("BLACKBOX_EMBEDDING_MODEL", "").strip()
+                or DEFAULT_EMBEDDING_MODEL,
+                "nli": os.environ.get("BLACKBOX_NLI_MODEL", "").strip() or DEFAULT_NLI_MODEL,
+            },
+        }
+
+    @app.post(
+        "/detect",
+        response_model=DetectResponse,
+        responses={
+            422: {"description": "Invalid input"},
+            502: {"description": "Upstream LLM provider failure"},
+            503: {"description": "Missing configuration or local model failure"},
+        },
+    )
+    @app.post("/v1/check", response_model=DetectResponse, include_in_schema=True)
+    async def detect(
+        payload: DetectRequest, detector: Detector = Depends(get_detector)
+    ) -> DetectResponse:
+        """Evaluate an answer; also available as ``POST /v1/check``."""
+        started = time.perf_counter()
+        try:
+            # Model inference is blocking, so run it off the event loop.
+            outcome = await run_in_threadpool(
+                detector.detect,
+                text=payload.text,
+                source=payload.source,
+                question=payload.question,
+                reference_facts=payload.reference_facts,
+                entities=payload.entities,
             )
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": exc.errors()}
-    )
+        except BlackBoxError:
+            raise  # handled by _blackbox_error_handler
+        except Exception as exc:
+            logger.error("Unexpected detection failure: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "internal_error",
+                    "message": "Unexpected internal error while running detection.",
+                },
+            ) from None
 
-
-# ==============================================================================
-# Modular Pipeline Stub (Separation of Concerns)
-# ==============================================================================
-
-def _run_detection_pipeline(request: DetectRequest) -> tuple[VerdictEnum, float, List[str]]:
-    """
-    Modular execution hook for blackbox detection.
-    
-    NOTE: Detector logic is deliberately kept outside app.py.
-    In upcoming milestones, this function will coordinate:
-      1. resample_entropy.py  -> consistency_score(question, model)
-      2. entailment_check.py  -> entailment(claim, reference_facts)
-      3. decision_logic.py    -> decide(consistency, entailment_result)
-    """
-    raise NotImplementedError(
-        "Black-box detection pipeline is not yet implemented. Modules "
-        "(resample_entropy, entailment_check, decision_logic) are pending integration."
-    )
-
-
-# ==============================================================================
-# Endpoints
-# ==============================================================================
-
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Health check endpoint",
-    tags=["Monitoring"]
-)
-async def health_check() -> HealthResponse:
-    """Returns basic service health status."""
-    return HealthResponse()
-
-
-@app.post(
-    "/detect",
-    response_model=DetectResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Black-box hallucination detection",
-    tags=["Detection"]
-)
-@app.post(
-    "/v1/check",
-    response_model=DetectResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Contract alias for black-box detection (ARCHITECTURE §3)",
-    tags=["Detection"]
-)
-async def detect_hallucination(payload: DetectRequest) -> DetectResponse:
-    """
-    Detect hallucinations in closed-model responses (ChatGPT / Claude).
-    
-    Accepts text, source, optional prompt/question, entities, and optional reference facts.
-    Times the detection execution for latency_ms reporting.
-    """
-    start_time = time.perf_counter()
-
-    try:
-        verdict, confidence, evidence = _run_detection_pipeline(payload)
-    except NotImplementedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=str(exc)
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Detection pipeline error: {str(exc)}"
+        return DetectResponse(
+            verdict=outcome.decision.verdict,
+            confidence=outcome.decision.confidence,
+            evidence=outcome.evidence,
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            signals=outcome.signals,
         )
 
-    latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-
-    return DetectResponse(
-        verdict=verdict,
-        confidence=confidence,
-        evidence=evidence,
-        latency_ms=latency_ms
-    )
+    return app
 
 
-# ==============================================================================
-# Runnable with uvicorn
-# ==============================================================================
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+app = create_app()

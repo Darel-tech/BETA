@@ -1,338 +1,475 @@
-"""
-Consistency checking via resampled model outputs (Technique 1).
+"""Response-consistency module (resampling + semantic consistency proxy).
 
-Asks a closed-model the same question multiple times with slight temperature
-variation, embeds the responses with a sentence-transformer, and measures
-semantic disagreement. Low disagreement → high consistency score.
+What this computes
+------------------
+Given a question, the module samples several answers from an external LLM
+(OpenAI/ChatGPT or Anthropic/Claude), embeds them with a sentence-transformers
+model, and returns the **mean pairwise cosine similarity** (clipped to
+``[0, 1]``) as ``consistency_score``.
 
-This module is responsible ONLY for:
-  - Generating multiple answers from a closed model (ChatGPT / Claude).
-  - Embedding those answers and computing a consistency score.
+This is a *semantic consistency proxy*. It is **not** the semantic entropy
+algorithm of Farquhar et al. (2024), which clusters answers by bidirectional
+entailment and computes entropy over the clusters. Despite the module name
+(kept for compatibility with the project layout), no entropy is computed here.
 
-It does NOT:
-  - Perform entailment / NLI checking (see entailment_check.py).
-  - Decide a verdict (see decision_logic.py).
+Known limitation: an LLM can be consistently wrong, so a high score is not
+evidence of factual correctness.
 
-Architecture reference: ARCHITECTURE_esha_blackbox.md §Week 2.
+Design
+------
+* Generation (``sample_answers``) and scoring (``compute_consistency``) are
+  separate and independently testable.
+* Callers can inject a ``SampleCaller`` and an ``Embedder`` so tests need no
+  network access, API keys, or model downloads.
+* Provider SDKs and sentence-transformers are imported lazily.
+* The embedding model is loaded once per process and cached.
+* Logs never contain API keys, prompts, answers, or provider error messages.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from functools import lru_cache
-from typing import List, Optional, Protocol, runtime_checkable
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
-from numpy.typing import NDArray
-from sentence_transformers import SentenceTransformer
+
+from .errors import (
+    BlackBoxError,
+    ConfigurationError,
+    InputValidationError,
+    ModelError,
+    ProviderError,
+)
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_OPENAI = "openai"
+PROVIDER_ANTHROPIC = "anthropic"
+SUPPORTED_PROVIDERS: Tuple[str, ...] = (PROVIDER_OPENAI, PROVIDER_ANTHROPIC)
 
-# ==============================================================================
-# Structured Result
-# ==============================================================================
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-@dataclass(frozen=True)
-class ConsistencyResult:
-    """
-    Output of the consistency-checking pipeline.
+DEFAULT_SAMPLE_COUNT = 5
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_MAX_TOKENS = 300
 
-    Attributes:
-        question:          The original question sent to the model.
-        sampled_answers:   The list of generated answer strings.
-        consistency_score: Mean pairwise cosine similarity (0.0–1.0).
-                           High → answers agree. Low → answers diverge.
-        num_samples:       Number of samples that were generated.
-    """
-    question: str
-    sampled_answers: List[str]
-    consistency_score: float
-    num_samples: int
+MIN_SAMPLES = 2
+MAX_SAMPLES = 20
+MAX_QUESTION_CHARS = 8000
+MAX_TOKENS_LIMIT = 4096
+
+#: Highest temperature each provider accepts.
+MAX_TEMPERATURE: Dict[str, float] = {PROVIDER_OPENAI: 2.0, PROVIDER_ANTHROPIC: 1.0}
+
+METHOD_DESCRIPTION = (
+    "mean pairwise cosine similarity of sentence embeddings, clipped to [0, 1] "
+    "(semantic consistency proxy; NOT the Farquhar et al. semantic entropy)"
+)
+
+#: ``(question, n, temperature) -> answers``. Model name and token limits are
+#: bound into the callable by :func:`make_provider_caller`.
+SampleCaller = Callable[[str, int, float], Sequence[str]]
 
 
-# ==============================================================================
-# Model Caller Abstraction
-# ==============================================================================
+class Embedder(Protocol):
+    """Anything with a sentence-transformers style ``encode`` method."""
 
-@runtime_checkable
-class ModelCaller(Protocol):
-    """
-    Protocol for calling a closed LLM.
-
-    Implementations must provide a `generate` method that sends a single
-    question to the model at a given temperature and returns the text response.
-    API keys are read from the environment — never passed as arguments or
-    hard-coded.
-    """
-
-    def generate(self, question: str, temperature: float) -> str:
-        """Generate a single answer for *question* at *temperature*."""
+    def encode(self, sentences: Sequence[str]) -> Any:
+        """Return an array-like of shape ``(len(sentences), dim)``."""
         ...
 
 
-class OpenAICaller:
+@dataclass(frozen=True)
+class ConsistencyResult:
+    """Outcome of resampling a question.
+
+    Attributes:
+        question: The question that was sampled.
+        answers: The sampled answers (stripped, non-blank).
+        consistency_score: Mean pairwise cosine similarity in ``[0, 1]``.
+            Higher means the samples agree more. A heuristic, not a probability.
+        sample_count: Number of answers used (``len(answers)``).
+        provider: ``"openai"`` or ``"anthropic"``.
+        model: Provider model name used for sampling.
+        temperature: Sampling temperature used.
+        method: Human-readable description of how the score was computed.
     """
-    Calls the OpenAI ChatCompletions API.
 
-    Reads OPENAI_API_KEY from the environment. Raises EnvironmentError if the
-    key is missing.
-    """
+    question: str
+    answers: Tuple[str, ...]
+    consistency_score: float
+    sample_count: int
+    provider: str = ""
+    model: str = ""
+    temperature: float = DEFAULT_TEMPERATURE
+    method: str = METHOD_DESCRIPTION
 
-    def __init__(self, model: str = "gpt-3.5-turbo") -> None:
-        self._api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not self._api_key:
-            raise EnvironmentError(
-                "OPENAI_API_KEY is not set. Add it to your .env file."
-            )
-        self._model = model
 
-    def generate(self, question: str, temperature: float) -> str:
-        """Call OpenAI ChatCompletions and return the assistant message."""
-        # Import lazily to avoid hard dependency at module load time
-        import openai
+# --------------------------------------------------------------------------
+# Validation and configuration helpers
+# --------------------------------------------------------------------------
 
-        client = openai.OpenAI(api_key=self._api_key)
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": question}],
-            temperature=temperature,
-            max_tokens=512,
+
+def _require_text(value: Any, name: str, max_chars: int = MAX_QUESTION_CHARS) -> str:
+    if not isinstance(value, str):
+        raise InputValidationError(f"{name} must be a string")
+    stripped = value.strip()
+    if not stripped:
+        raise InputValidationError(f"{name} must not be blank")
+    if len(stripped) > max_chars:
+        raise InputValidationError(f"{name} must be at most {max_chars} characters")
+    return stripped
+
+
+def _validate_provider(provider: Any) -> str:
+    if not isinstance(provider, str) or provider.strip().lower() not in SUPPORTED_PROVIDERS:
+        raise InputValidationError(
+            f"provider must be one of {list(SUPPORTED_PROVIDERS)}"
         )
-        content = response.choices[0].message.content
-        return content.strip() if content else ""
+    return provider.strip().lower()
 
 
-class AnthropicCaller:
-    """
-    Calls the Anthropic Messages API.
+def _validate_int(value: Any, name: str, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InputValidationError(f"{name} must be an integer")
+    if not low <= value <= high:
+        raise InputValidationError(f"{name} must be between {low} and {high}")
+    return value
 
-    Reads ANTHROPIC_API_KEY from the environment. Raises EnvironmentError if
-    the key is missing.
-    """
 
-    def __init__(self, model: str = "claude-3-haiku-20240307") -> None:
-        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not self._api_key:
-            raise EnvironmentError(
-                "ANTHROPIC_API_KEY is not set. Add it to your .env file."
-            )
-        self._model = model
-
-    def generate(self, question: str, temperature: float) -> str:
-        """Call Anthropic Messages API and return the assistant text."""
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=self._api_key)
-        response = client.messages.create(
-            model=self._model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": question}],
-            temperature=temperature,
+def _validate_temperature(value: Any, provider: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InputValidationError("temperature must be a number")
+    value = float(value)
+    limit = MAX_TEMPERATURE[provider]
+    if not math.isfinite(value) or not 0.0 <= value <= limit:
+        raise InputValidationError(
+            f"temperature must be between 0 and {limit} for provider '{provider}'"
         )
-        # response.content is a list of ContentBlock; extract the text.
-        text_parts = [
-            block.text for block in response.content if hasattr(block, "text")
-        ]
-        return " ".join(text_parts).strip()
+    return value
 
 
-def get_model_caller(source: str) -> ModelCaller:
-    """
-    Factory: return the correct ModelCaller for a given source identifier.
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer") from exc
 
-    Args:
-        source: One of "chatgpt" or "claude" (matches app.py SourceEnum).
 
-    Returns:
-        A ModelCaller instance configured for that provider.
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number") from exc
+
+
+def resolve_model(provider: str, model: Optional[str] = None) -> str:
+    """Return the model name to use: explicit argument, env var, or default."""
+    if model and model.strip():
+        return model.strip()
+    if provider == PROVIDER_OPENAI:
+        return os.environ.get("BLACKBOX_OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
+    return os.environ.get("BLACKBOX_ANTHROPIC_MODEL", "").strip() or DEFAULT_ANTHROPIC_MODEL
+
+
+def _api_key(env_name: str) -> str:
+    key = os.environ.get(env_name, "").strip()
+    if not key:
+        raise ConfigurationError(f"{env_name} is not set")
+    return key
+
+
+# --------------------------------------------------------------------------
+# Generation
+# --------------------------------------------------------------------------
+
+
+def make_provider_caller(
+    provider: str,
+    model: Optional[str] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> SampleCaller:
+    """Build a :data:`SampleCaller` backed by the official provider SDK.
+
+    The API key is read from ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` when
+    the returned callable is *invoked*, and the SDK is imported at that moment,
+    so constructing a caller never touches the network or the environment.
 
     Raises:
-        ValueError: If *source* is not a recognised provider.
+        InputValidationError: Unknown provider.
     """
-    source_lower = source.strip().lower()
-    if source_lower == "chatgpt":
-        return OpenAICaller()
-    if source_lower == "claude":
-        return AnthropicCaller()
-    raise ValueError(
-        f"Unsupported source '{source}'. Expected 'chatgpt' or 'claude'."
-    )
+    provider = _validate_provider(provider)
+    model_name = resolve_model(provider, model)
+    if provider == PROVIDER_OPENAI:
+        return _openai_caller(model_name, max_tokens)
+    return _anthropic_caller(model_name, max_tokens)
 
 
-# ==============================================================================
-# Embedding & Scoring (pure computation — no API calls)
-# ==============================================================================
-
-@lru_cache(maxsize=4)
-def _load_embedding_model(
-    model_name: str = "all-MiniLM-L6-v2",
-) -> SentenceTransformer:
-    """
-    Load and cache a sentence-transformer model.
-
-    Using lru_cache avoids reloading the model on every call, which matters
-    both for latency and for keeping memory stable during repeated test runs.
-    """
-    logger.info("Loading sentence-transformer model: %s", model_name)
-    return SentenceTransformer(model_name)
-
-
-def compute_consistency_score(
-    answers: List[str],
-    embedding_model_name: str = "all-MiniLM-L6-v2",
-) -> float:
-    """
-    Measure semantic agreement among a list of answer strings.
-
-    Process:
-      1. Encode every answer into a dense vector with a sentence-transformer.
-      2. Compute pairwise cosine similarity for all unique (i, j) pairs.
-      3. Return the mean similarity as the consistency score.
-
-    Returns:
-        A float in [0.0, 1.0].
-        - 1.0 means every answer is semantically identical.
-        - Values near 0.0 mean the answers strongly disagree.
-        - Returns 1.0 trivially when there are fewer than 2 answers.
-
-    Args:
-        answers:              List of generated answer strings.
-        embedding_model_name: Name of a sentence-transformers model to use.
-    """
-    if len(answers) < 2:
-        # Cannot measure disagreement with fewer than 2 answers.
-        return 1.0
-
-    model = _load_embedding_model(embedding_model_name)
-    embeddings: NDArray[np.float32] = model.encode(
-        answers, convert_to_numpy=True, normalize_embeddings=True
-    )
-
-    # With L2-normalised vectors, cosine similarity = dot product.
-    num = len(embeddings)
-    similarities: List[float] = []
-    for i in range(num):
-        for j in range(i + 1, num):
-            sim = float(np.dot(embeddings[i], embeddings[j]))
-            similarities.append(sim)
-
-    mean_similarity = float(np.mean(similarities))
-
-    # Clamp to [0, 1] — cosine similarity on normalised vectors is in [-1, 1]
-    # but for semantically meaningful text it rarely goes negative.
-    return max(0.0, min(1.0, mean_similarity))
-
-
-# ==============================================================================
-# Sampling (generation across temperature variation)
-# ==============================================================================
-
-def _sample_answers(
-    caller: ModelCaller,
-    question: str,
-    n: int = 5,
-    base_temperature: float = 0.7,
-    temperature_spread: float = 0.2,
-) -> List[str]:
-    """
-    Generate *n* answers to *question* with slight temperature variation.
-
-    The architecture specifies "slight temperature variation" across resamples.
-    Each sample uses a temperature uniformly spaced around *base_temperature*
-    within ± *temperature_spread*, clamped to [0.0, 1.5].
-
-    Args:
-        caller:              A ModelCaller instance for the target provider.
-        question:            The question to ask the model.
-        n:                   Number of samples to generate.
-        base_temperature:    Centre of the temperature sweep.
-        temperature_spread:  Half-width of the temperature range.
-
-    Returns:
-        A list of *n* answer strings.
-    """
-    if n < 1:
-        raise ValueError("Number of samples (n) must be >= 1.")
-
-    # Build a list of temperatures spread around the base
-    if n == 1:
-        temperatures = [base_temperature]
-    else:
-        low = max(0.0, base_temperature - temperature_spread)
-        high = min(1.5, base_temperature + temperature_spread)
-        temperatures = [
-            low + (high - low) * i / (n - 1) for i in range(n)
-        ]
-
-    answers: List[str] = []
-    for idx, temp in enumerate(temperatures):
-        logger.debug(
-            "Sampling %d/%d at temperature=%.2f", idx + 1, n, temp
-        )
+def _openai_caller(model_name: str, max_tokens: int) -> SampleCaller:
+    def call(question: str, n: int, temperature: float) -> Sequence[str]:
+        key = _api_key("OPENAI_API_KEY")
         try:
-            answer = caller.generate(question, temperature=temp)
-            answers.append(answer)
-        except Exception:
-            logger.exception(
-                "Failed to generate sample %d/%d at temperature=%.2f",
-                idx + 1, n, temp,
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ConfigurationError("The 'openai' package is not installed") from exc
+        try:
+            client = OpenAI(api_key=key)
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": question}],
+                temperature=temperature,
+                n=n,
+                max_completion_tokens=max_tokens,
             )
-            # Re-raise so the caller knows sampling failed — don't silently
-            # swallow errors that would corrupt the consistency score.
-            raise
+            return [choice.message.content or "" for choice in response.choices]
+        except Exception as exc:  # SDK errors vary; never echo their messages.
+            logger.warning("OpenAI sampling failed: %s", type(exc).__name__)
+            raise ProviderError(
+                f"OpenAI request failed ({type(exc).__name__})"
+            ) from exc
 
-    return answers
+    return call
 
 
-# ==============================================================================
-# Public API — matches the signature in ARCHITECTURE_esha_blackbox.md §Week 2
-# ==============================================================================
+def _anthropic_caller(model_name: str, max_tokens: int) -> SampleCaller:
+    def call(question: str, n: int, temperature: float) -> Sequence[str]:
+        key = _api_key("ANTHROPIC_API_KEY")
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:
+            raise ConfigurationError("The 'anthropic' package is not installed") from exc
+        try:
+            client = Anthropic(api_key=key)
+            answers = []
+            # The Messages API returns one completion per request, so loop.
+            for _ in range(n):
+                response = client.messages.create(
+                    model=model_name,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=[{"role": "user", "content": question}],
+                )
+                answers.append(
+                    "".join(
+                        block.text
+                        for block in response.content
+                        if getattr(block, "type", None) == "text"
+                    )
+                )
+            return answers
+        except Exception as exc:
+            logger.warning("Anthropic sampling failed: %s", type(exc).__name__)
+            raise ProviderError(
+                f"Anthropic request failed ({type(exc).__name__})"
+            ) from exc
 
-def consistency_score(
+    return call
+
+
+def sample_answers(
     question: str,
-    model: str,
-    n: int = 5,
     *,
-    embedding_model_name: str = "all-MiniLM-L6-v2",
-    caller: Optional[ModelCaller] = None,
-) -> ConsistencyResult:
-    """
-    End-to-end consistency checking for a single question.
-
-    1. Calls the target closed model *n* times with temperature variation.
-    2. Embeds all answers with a sentence-transformer.
-    3. Computes mean pairwise cosine similarity as the consistency score.
+    provider: str,
+    n: int = DEFAULT_SAMPLE_COUNT,
+    temperature: float = DEFAULT_TEMPERATURE,
+    model: Optional[str] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    caller: Optional[SampleCaller] = None,
+) -> list:
+    """Sample ``n`` answers to ``question`` from an LLM provider.
 
     Args:
-        question:             The question to ask the model.
-        model:                Source identifier ("chatgpt" or "claude").
-        n:                    Number of resamples (default 5).
-        embedding_model_name: Sentence-transformer model for embeddings.
-        caller:               Optional pre-built ModelCaller (useful for
-                              testing with a mock). If None, one is created
-                              via get_model_caller(model).
+        question: The question to ask.
+        provider: ``"openai"`` or ``"anthropic"``.
+        n: Number of answers (``MIN_SAMPLES``..``MAX_SAMPLES``).
+        temperature: Sampling temperature (provider-specific upper bound).
+        model: Model name; defaults to the env var or built-in default.
+        max_tokens: Per-answer output token cap.
+        caller: Optional injected callable replacing the real SDK (for tests).
 
     Returns:
-        A ConsistencyResult with sampled answers, score, and sample count.
+        A list of 2..n stripped, non-blank answers.
 
     Raises:
-        ValueError:        If *model* is not a supported source.
-        EnvironmentError:  If the required API key is not set.
-        Exception:         Propagated from the model API if a call fails.
+        InputValidationError: Invalid arguments.
+        ConfigurationError: Missing API key / SDK.
+        ProviderError: The provider call failed or returned too few answers.
     """
+    question = _require_text(question, "question")
+    provider = _validate_provider(provider)
+    n = _validate_int(n, "n", MIN_SAMPLES, MAX_SAMPLES)
+    temperature = _validate_temperature(temperature, provider)
+    max_tokens = _validate_int(max_tokens, "max_tokens", 1, MAX_TOKENS_LIMIT)
+
     if caller is None:
-        caller = get_model_caller(model)
+        caller = make_provider_caller(provider, model=model, max_tokens=max_tokens)
 
-    answers = _sample_answers(caller, question, n=n)
-    score = compute_consistency_score(answers, embedding_model_name)
+    try:
+        raw = caller(question, n, temperature)
+    except BlackBoxError:
+        raise
+    except Exception as exc:
+        logger.warning("Sampling via %s failed: %s", provider, type(exc).__name__)
+        raise ProviderError(
+            f"Sampling via {provider} failed ({type(exc).__name__})"
+        ) from exc
 
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise ProviderError("Provider returned an unexpected response shape")
+    answers = [a.strip() for a in raw if isinstance(a, str) and a.strip()]
+    if len(answers) < MIN_SAMPLES:
+        raise ProviderError(
+            f"Provider returned fewer than {MIN_SAMPLES} usable answers"
+        )
+    return answers[:n]
+
+
+# --------------------------------------------------------------------------
+# Embeddings and consistency
+# --------------------------------------------------------------------------
+
+_EMBEDDER_CACHE: Dict[str, Embedder] = {}
+_EMBEDDER_LOCK = threading.Lock()
+
+
+def _load_embedder(model_name: str) -> Embedder:
+    """Load a SentenceTransformer (downloads weights on first use)."""
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(model_name)
+    except Exception as exc:
+        raise ModelError(
+            f"Could not load embedding model '{model_name}' ({type(exc).__name__})"
+        ) from exc
+
+
+def get_default_embedder(model_name: Optional[str] = None) -> Embedder:
+    """Return a process-wide cached embedder, loading it on first call only."""
+    name = (
+        (model_name or "").strip()
+        or os.environ.get("BLACKBOX_EMBEDDING_MODEL", "").strip()
+        or DEFAULT_EMBEDDING_MODEL
+    )
+    with _EMBEDDER_LOCK:
+        if name not in _EMBEDDER_CACHE:
+            _EMBEDDER_CACHE[name] = _load_embedder(name)
+        return _EMBEDDER_CACHE[name]
+
+
+def clear_embedder_cache() -> None:
+    """Drop cached embedders (used by tests)."""
+    with _EMBEDDER_LOCK:
+        _EMBEDDER_CACHE.clear()
+
+
+def compute_consistency(
+    answers: Sequence[str], embedder: Optional[Embedder] = None
+) -> float:
+    """Mean pairwise cosine similarity of ``answers``, clipped to ``[0, 1]``.
+
+    Negative similarities are clipped to 0 so the score stays in ``[0, 1]``.
+
+    Raises:
+        InputValidationError: Fewer than two answers, or non-string/blank items.
+        ModelError: The embedder failed or returned malformed vectors.
+    """
+    if isinstance(answers, (str, bytes)) or not isinstance(answers, Sequence):
+        raise InputValidationError("answers must be a list of strings")
+    if len(answers) < MIN_SAMPLES:
+        raise InputValidationError(
+            f"At least {MIN_SAMPLES} answers are required to measure consistency"
+        )
+    cleaned = []
+    for item in answers:
+        if not isinstance(item, str) or not item.strip():
+            raise InputValidationError("answers must be non-blank strings")
+        cleaned.append(item.strip())
+
+    if embedder is None:
+        embedder = get_default_embedder()
+
+    try:
+        vectors = np.asarray(embedder.encode(cleaned), dtype=float)
+    except BlackBoxError:
+        raise
+    except Exception as exc:
+        raise ModelError(f"Embedding failed ({type(exc).__name__})") from exc
+
+    if vectors.ndim != 2 or vectors.shape[0] != len(cleaned) or vectors.shape[1] == 0:
+        raise ModelError("Embedder returned vectors with an unexpected shape")
+    if not np.all(np.isfinite(vectors)):
+        raise ModelError("Embedder returned non-finite values")
+    norms = np.linalg.norm(vectors, axis=1)
+    if np.any(norms == 0):
+        raise ModelError("Embedder returned a zero vector")
+
+    unit = vectors / norms[:, None]
+    sims = unit @ unit.T
+    upper = sims[np.triu_indices(len(cleaned), k=1)]
+    score = float(np.clip(upper.mean(), 0.0, 1.0))
+    return score
+
+
+def measure_consistency(
+    question: str,
+    *,
+    provider: str,
+    n: Optional[int] = None,
+    temperature: Optional[float] = None,
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    caller: Optional[SampleCaller] = None,
+    embedder: Optional[Embedder] = None,
+) -> ConsistencyResult:
+    """Sample answers to ``question`` and score their semantic consistency.
+
+    ``n``, ``temperature`` and ``max_tokens`` default to the environment
+    variables ``BLACKBOX_SAMPLE_COUNT``, ``BLACKBOX_TEMPERATURE`` and
+    ``BLACKBOX_MAX_TOKENS`` (then to built-in defaults). Sampling happens
+    before the embedding model is loaded, so a missing API key fails fast.
+    """
+    provider = _validate_provider(provider)
+    n = _env_int("BLACKBOX_SAMPLE_COUNT", DEFAULT_SAMPLE_COUNT) if n is None else n
+    temperature = (
+        _env_float("BLACKBOX_TEMPERATURE", DEFAULT_TEMPERATURE)
+        if temperature is None
+        else temperature
+    )
+    max_tokens = (
+        _env_int("BLACKBOX_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+        if max_tokens is None
+        else max_tokens
+    )
+
+    answers = sample_answers(
+        question,
+        provider=provider,
+        n=n,
+        temperature=temperature,
+        model=model,
+        max_tokens=max_tokens,
+        caller=caller,
+    )
+    score = compute_consistency(answers, embedder)
     return ConsistencyResult(
-        question=question,
-        sampled_answers=answers,
+        question=question.strip(),
+        answers=tuple(answers),
         consistency_score=score,
-        num_samples=len(answers),
+        sample_count=len(answers),
+        provider=provider,
+        model=resolve_model(provider, model),
+        temperature=float(temperature),
     )
