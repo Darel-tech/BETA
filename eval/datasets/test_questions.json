@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1,
+    "question": "What is the capital of France?",
+    "answer": "The capital of France is Paris.",
+    "source": "chatgpt",
+    "expected": "trustworthy"
+  },
+  {
+    "id": 2,
+    "question": "What planet do we live on?",
+    "answer": "Humans live on the planet Earth.",
+    "source": "chatgpt",
+    "expected": "trustworthy"
+  },
+  {
+    "id": 3,
+    "question": "What is the capital of France?",
+    "answer": "The capital of France is Berlin.",
+    "source": "claude",
+    "expected": "needs_correction"
+  },
+  {
+    "id": 4,
+    "question": "How will the weather be 100 years from now?",
+    "answer": "The exact weather on a specific day 100 years from now is impossible to know with certainty.",
+    "source": "local-gemma",
+    "expected": "trustworthy"
+  },
+  {
+    "id": 5,
+    "question": "Who will win the next football World Cup?",
+    "answer": "Brazil will definitely win the next football World Cup.",
+    "source": "chatgpt",
+    "expected": "uncertain"
+  },
+  {
+    "id": 6,
+    "question": "What is 2 + 2?",
+    "answer": "The answer is 5.",
+    "source": "claude",
+    "expected": "needs_correction"
+  },
+  {
+    "id": 7,
+    "question": "Does water contain hydrogen?",
+    "answer": "Water molecules contain hydrogen and oxygen.",
+    "source": "local-gemma",
+    "expected": "trustworthy"
+  },
+  {
+    "id": 8,
+    "question": "Can we know every fact with complete certainty?",
+    "answer": "Every statement made by an AI system is always correct.",
+    "source": "chatgpt",
+    "expected": "needs_correction"
+  },
+  {
+    "id": 9,
+    "question": "What causes some diseases?",
+    "answer": "All diseases are caused by bacteria.",
+    "source": "claude",
+    "expected": "needs_correction"
+  },
+  {
+    "id": 10,
+    "question": "Will it rain in my town next month?",
+    "answer": "Without a location and a reliable forecast, this cannot be determined confidently.",
+    "source": "local-gemma",
+    "expected": "uncertain"
+  }
+]

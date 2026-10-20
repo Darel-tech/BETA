@@ -1,0 +1,114 @@
+{
+  "questions_evaluated": 10,
+  "correct_matches": 2,
+  "accuracy": 0.2,
+  "true_positives": 0,
+  "false_positives": 0,
+  "false_negatives": 4,
+  "precision": 0.0,
+  "recall": 0.0,
+  "f1_score": 0.0,
+  "results": [
+    {
+      "id": 1,
+      "question": "What is the capital of France?",
+      "source": "chatgpt",
+      "expected": "trustworthy",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 2,
+      "question": "What planet do we live on?",
+      "source": "chatgpt",
+      "expected": "trustworthy",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 3,
+      "question": "What is the capital of France?",
+      "source": "claude",
+      "expected": "needs_correction",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 4,
+      "question": "How will the weather be 100 years from now?",
+      "source": "local-gemma",
+      "expected": "trustworthy",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 5,
+      "question": "Who will win the next football World Cup?",
+      "source": "chatgpt",
+      "expected": "uncertain",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": true
+    },
+    {
+      "id": 6,
+      "question": "What is 2 + 2?",
+      "source": "claude",
+      "expected": "needs_correction",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 7,
+      "question": "Does water contain hydrogen?",
+      "source": "local-gemma",
+      "expected": "trustworthy",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 8,
+      "question": "Can we know every fact with complete certainty?",
+      "source": "chatgpt",
+      "expected": "needs_correction",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 9,
+      "question": "What causes some diseases?",
+      "source": "claude",
+      "expected": "needs_correction",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": false
+    },
+    {
+      "id": 10,
+      "question": "Will it rain in my town next month?",
+      "source": "local-gemma",
+      "expected": "uncertain",
+      "predicted": "uncertain",
+      "confidence": 0.5,
+      "latency_ms": 0,
+      "correct": true
+    }
+  ],
+  "note": "Mock API results; not real AI detection performance."
+}
