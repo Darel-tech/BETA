@@ -1,0 +1,26 @@
+
+{
+  "manifest_version": 3,
+  "name": "BETA AI Answer Evaluator",
+  "version": "1.0.0",
+  "description": "Evaluate AI answers on ChatGPT and Claude using BETA.",
+  "host_permissions": [
+    "http://localhost:3000/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "BETA AI Answer Evaluator"
+  }
+}
