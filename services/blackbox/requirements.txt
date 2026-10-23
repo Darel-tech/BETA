@@ -1,0 +1,19 @@
+# Black-box detector dependencies (Python 3.11+; tested target 3.13).
+# Ranges are lower-bounded for the APIs used and capped below the next major.
+
+# --- Web service ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+
+# --- Provider SDKs (official) ---
+openai>=1.54,<3.0
+anthropic>=0.40,<1.0
+
+# --- ML (pulls in PyTorch; large download) ---
+sentence-transformers>=3.0,<6.0
+numpy>=1.26,<3.0
+
+# --- Tests (also needed by TestClient) ---
+pytest>=8.0,<10.0
+httpx>=0.27,<1.0
