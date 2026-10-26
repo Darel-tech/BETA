@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-psycopg[binary]
-python-dotenv
-sentence-transformers
-pytest
