@@ -1,250 +1,193 @@
+/**
+ * BETA Extension — Content Script
+ *
+ * Automatically detects when a ChatGPT or Claude AI reply finishes streaming
+ * and fires a check WITHOUT any user interaction.
+ *
+ * Rules (Phase 5.5.4):
+ * - Uses MutationObserver on the reply container — not setInterval.
+ * - Debounces 500 ms after the last DOM mutation so the check never fires
+ *   mid-stream.
+ * - Fires automatically; the user never clicks, selects text, or opens a
+ *   popup. The badge appears next to the message once the reply is done.
+ * - API keys NEVER appear in extension code — calls go through the BETA
+ *   web app which holds the keys server-side (Phase 12 anti-pattern check).
+ */
 
 (() => {
+  "use strict";
+
   const host = window.location.hostname;
+  const APP_URL = "http://localhost:3000"; // The Next.js app — not the Python services
 
-  // Send an extracted answer to the BETA API through the
-  // extension's background service worker.
-  function sendAnswerToBeta(answer, source) {
-    chrome.runtime.sendMessage(
-      {
-        type: "BETA_CHECK_ANSWER",
-        text: answer,
-        source: source
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          console.error(
-            "BETA extension error:",
-            chrome.runtime.lastError.message
-          );
-          return;
-        }
+  // ── Badge helpers ─────────────────────────────────────────────────────────
 
-        if (!response || !response.success) {
-          console.error(
-            "BETA API error:",
-            response?.error || "No response from service worker"
-          );
-          return;
-        }
+  function verdictClass(verdict) {
+    return {
+      trustworthy: "beta-verdict--trustworthy",
+      uncertain: "beta-verdict--uncertain",
+      needs_correction: "beta-verdict--needs-correction",
+    }[verdict] ?? "beta-verdict--unknown";
+  }
 
-        console.log("BETA: Evaluation result:");
-        console.log(response.result);
+  function verdictLabel(verdict) {
+    return {
+      trustworthy: "✓ Trustworthy",
+      uncertain: "~ Uncertain",
+      needs_correction: "✗ Needs Correction",
+    }[verdict] ?? "? Unknown";
+  }
 
-        showBetaResult(response.result, answer);
+  function injectBadgeStyles() {
+    if (document.getElementById("beta-styles")) return;
+    const style = document.createElement("style");
+    style.id = "beta-styles";
+    style.textContent = `
+      .beta-badge {
+        display: inline-flex; align-items: center; gap: 6px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 11px; font-weight: 700;
+        padding: 3px 10px; border-radius: 999px;
+        margin-top: 8px; cursor: pointer;
+        border: 1px solid transparent;
+        transition: opacity 0.2s;
+        text-decoration: none;
       }
-    );
+      .beta-badge:hover { opacity: 0.8; }
+      .beta-verdict--trustworthy  { color:#22c55e; background:rgba(34,197,94,.12);  border-color:rgba(34,197,94,.35);  }
+      .beta-verdict--uncertain    { color:#f59e0b; background:rgba(245,158,11,.12); border-color:rgba(245,158,11,.35); }
+      .beta-verdict--needs-correction { color:#ef4444; background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.35); }
+      .beta-verdict--loading      { color:#94a3b8; background:rgba(148,163,184,.1); border-color:rgba(148,163,184,.2);  }
+      .beta-verdict--error        { color:#64748b; background:rgba(100,116,139,.1); border-color:rgba(100,116,139,.2);  }
+    `;
+    document.head.appendChild(style);
   }
 
-  // Display the API result on the current page.
-  function showBetaResult(result, checkedAnswer) {
-    let panel = document.getElementById("beta-result-panel");
-
-    if (!panel) {
-      panel = document.createElement("div");
-      panel.id = "beta-result-panel";
-
-      Object.assign(panel.style, {
-        position: "fixed",
-        bottom: "20px",
-        right: "20px",
-        zIndex: "999999",
-        background: "#ffffff",
-        color: "#222222",
-        padding: "16px",
-        borderRadius: "12px",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
-        fontFamily: "Arial, sans-serif",
-        fontSize: "14px",
-        width: "280px",
-        maxHeight: "60vh",
-        overflowY: "auto",
-        border: "1px solid #dddddd"
-      });
-
-      document.body.appendChild(panel);
+  /**
+   * Insert or update a badge element AFTER a reply container element.
+   * Never appended inside the AI reply text itself.
+   */
+  function upsertBadge(containerEl, state, verdict, question) {
+    let badge = containerEl.__betaBadge;
+    if (!badge) {
+      badge = document.createElement("a");
+      badge.className = "beta-badge";
+      // Link to the compare page pre-populated with the question
+      containerEl.insertAdjacentElement("afterend", badge);
+      containerEl.__betaBadge = badge;
     }
 
-    panel.replaceChildren();
-
-    const heading = document.createElement("div");
-    heading.textContent = "BETA Answer Evaluation";
-    heading.style.fontWeight = "bold";
-    heading.style.marginBottom = "10px";
-
-    const verdictText = document.createElement("div");
-    verdictText.textContent =
-      "Verdict: " + (result?.verdict ?? "Unknown");
-
-    const confidenceText = document.createElement("div");
-    const confidence = result?.confidence;
-
-    confidenceText.textContent =
-      "Confidence: " +
-      (typeof confidence === "number"
-        ? Math.round(confidence * 100) + "%"
-        : "N/A");
-
-    const evidenceHeading = document.createElement("div");
-    evidenceHeading.textContent = "Evidence:";
-    evidenceHeading.style.fontWeight = "bold";
-    evidenceHeading.style.marginTop = "12px";
-
-    const evidenceList = document.createElement("ul");
-    evidenceList.style.paddingLeft = "20px";
-    evidenceList.style.marginBottom = "0";
-
-    const evidence = Array.isArray(result?.evidence)
-      ? result.evidence
-      : [];
-
-    if (evidence.length > 0) {
-      evidence.forEach((item) => {
-        const listItem = document.createElement("li");
-        listItem.textContent = String(item);
-        listItem.style.marginTop = "6px";
-        evidenceList.appendChild(listItem);
-      });
+    if (state === "loading") {
+      badge.className = "beta-badge beta-verdict--loading";
+      badge.textContent = "⟳ BETA checking…";
+      badge.href = "#";
+    } else if (state === "error") {
+      badge.className = "beta-badge beta-verdict--error";
+      badge.textContent = "BETA: check failed";
+      badge.href = APP_URL;
     } else {
-      const listItem = document.createElement("li");
-      listItem.textContent = "No evidence available.";
-      evidenceList.appendChild(listItem);
+      badge.className = `beta-badge ${verdictClass(verdict)}`;
+      badge.textContent = `BETA ${verdictLabel(verdict)}`;
+      badge.target = "_blank";
+      badge.rel = "noopener noreferrer";
+      badge.href = question
+        ? `${APP_URL}/compare?q=${encodeURIComponent(question)}`
+        : APP_URL;
     }
-
-    const closeButton = document.createElement("button");
-    closeButton.textContent = "Close";
-    closeButton.style.marginTop = "12px";
-    closeButton.style.padding = "6px 12px";
-    closeButton.style.cursor = "pointer";
-    closeButton.addEventListener("click", () => panel.remove());
-
-    const answerHeading = document.createElement("div");
-answerHeading.textContent = "Answer checked:";
-answerHeading.style.fontWeight = "bold";
-answerHeading.style.marginTop = "12px";
-
-const answerText = document.createElement("div");
-answerText.textContent = checkedAnswer || "Answer unavailable";
-answerText.style.marginTop = "6px";
-answerText.style.whiteSpace = "pre-wrap";
-answerText.style.overflowWrap = "anywhere";
-    panel.append(
-      heading,
-      answerHeading,
-      answerText,
-      verdictText,
-      confidenceText,
-      evidenceHeading,
-      evidenceList,
-      closeButton
-    );
   }
 
-  // Extract the latest assistant answer from ChatGPT.
-  function getLatestChatGPTAnswer() {
-    const containers = [
-      ...document.querySelectorAll(
-        "[data-content-search-unit-key]"
-      )
-    ].filter((element) =>
-      element
-        .getAttribute("data-content-search-unit-key")
-        ?.includes(":assistant")
+  // ── API call ───────────────────────────────────────────────────────────────
+
+  async function checkWithBeta(answer, source, question) {
+    const res = await fetch(`${APP_URL}/api/check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: answer, source, question }),
+    });
+    if (!res.ok) throw new Error(`BETA API ${res.status}`);
+    return res.json();
+  }
+
+  // ── Extractor helpers ──────────────────────────────────────────────────────
+
+  function getLatestChatGPTReply() {
+    // ChatGPT: assistant messages carry data-content-search-unit-key with ":assistant"
+    const containers = [...document.querySelectorAll("[data-content-search-unit-key]")].filter(
+      (el) => el.getAttribute("data-content-search-unit-key")?.includes(":assistant")
     );
-
-    if (containers.length === 0) {
-      return null;
-    }
-
+    if (!containers.length) return null;
     const latest = containers[containers.length - 1];
-
-    const answer = latest.innerText
+    const text = latest.innerText
       .split("\n")
-      .filter(
-        (line) =>
-          line.trim() &&
-          line.trim() !== "ChatGPT said:"
-      )
+      .filter((l) => l.trim() && l.trim() !== "ChatGPT said:")
       .join("\n")
       .trim();
-
-    return answer || null;
+    return text ? { el: latest, text } : null;
   }
 
-  // Try common Claude answer selectors.
-  // These selectors must be verified against the live page.
-  
-  // Extract the latest assistant answer from Claude.
-  function getLatestClaudeAnswer() {
-    const messages = document.querySelectorAll(
-      '[data-testid="assistant-message"]'
-    );
+  function getLatestClaudeReply() {
+    const messages = document.querySelectorAll('[data-testid="assistant-message"]');
+    if (!messages.length) return null;
+    const latest = messages[messages.length - 1];
+    const textEl = latest.querySelector("[data-perf-reply-text]") ?? latest;
+    const text = textEl.innerText?.trim();
+    return text ? { el: latest, text } : null;
+  }
 
-    if (messages.length === 0) {
-      return null;
+  // ── Core watcher factory ───────────────────────────────────────────────────
+
+  function watchReplies(source, getLatestReply) {
+    injectBadgeStyles();
+
+    let lastCheckedText = "";
+    let debounceTimer = null;
+    let inflightText = null;
+
+    async function handleStableReply() {
+      const reply = getLatestReply();
+      if (!reply) return;
+      const { el, text } = reply;
+
+      // Skip if we already checked this exact text
+      if (text === lastCheckedText || text === inflightText) return;
+
+      inflightText = text;
+      upsertBadge(el, "loading", null, null);
+
+      try {
+        const result = await checkWithBeta(text, source, text.slice(0, 200));
+        lastCheckedText = text;
+        inflightText = null;
+        upsertBadge(el, "done", result.verdict, text.slice(0, 200));
+      } catch (err) {
+        inflightText = null;
+        console.error("BETA extension check failed:", err);
+        upsertBadge(el, "error", null, null);
+      }
     }
 
-    const latestMessage = messages[messages.length - 1];
+    // MutationObserver — fires on every DOM change in the conversation
+    const observer = new MutationObserver(() => {
+      clearTimeout(debounceTimer);
+      // Wait 500 ms of silence before treating the reply as "finished streaming"
+      debounceTimer = setTimeout(handleStableReply, 500);
+    });
 
-    // Prefer the element that contains the actual response text.
-    const replyText = latestMessage.querySelector(
-      "[data-perf-reply-text]"
-    );
+    // Observe the whole document body for subtree changes
+    observer.observe(document.body, { childList: true, subtree: true });
 
-    const answer = (
-      replyText || latestMessage
-    ).innerText?.trim();
-
-    return answer || null;
+    // Also handle the case where a reply is already on-screen before the
+    // observer starts (e.g. page reload mid-conversation)
+    setTimeout(handleStableReply, 1000);
   }
 
+  // ── Entry point ────────────────────────────────────────────────────────────
 
-  // Retry extraction because answers may take time to appear.
-  function startAnswerDetection(source, getAnswer) {
-  let lastSentAnswer = "";
-  let checkInProgress = false;
-
-  async function checkForNewAnswer() {
-    if (checkInProgress) return;
-
-    const answer = getAnswer();
-
-    if (!answer || answer === lastSentAnswer) return;
-
-    checkInProgress = true;
-    lastSentAnswer = answer;
-
-    console.log(
-      "BETA: New " +
-        (source === "chatgpt" ? "ChatGPT" : "Claude") +
-        " answer detected:"
-    );
-    console.log(answer);
-
-    sendAnswerToBeta(answer, source);
-
-    checkInProgress = false;
-  }
-
-  // Check the current answer and keep watching for new replies.
-  checkForNewAnswer();
-  setInterval(checkForNewAnswer, 1500);
-}
-
-  // Run only on supported websites.
   if (host === "chatgpt.com") {
-    console.log("BETA extension detected: ChatGPT");
-
-    startAnswerDetection(
-      "chatgpt",
-      getLatestChatGPTAnswer
-    );
+    console.log("BETA extension: watching ChatGPT");
+    watchReplies("chatgpt", getLatestChatGPTReply);
   } else if (host === "claude.ai") {
-    console.log("BETA extension detected: Claude");
-
-    startAnswerDetection(
-      "claude",
-      getLatestClaudeAnswer
-    );
+    console.log("BETA extension: watching Claude");
+    watchReplies("claude", getLatestClaudeReply);
   }
 })();

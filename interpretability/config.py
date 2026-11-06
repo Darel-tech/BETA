@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     sae_layer: int = Field(default=20, ge=0, le=25)
     device: Literal["cuda", "cpu", "mps", "auto"] = Field(default="auto")
     model_dtype: Literal["float16", "bfloat16", "float32"] = Field(default="bfloat16")
+    # Token budget for /generate — keep short so the service stays within budget
+    generate_max_new_tokens: int = Field(default=256, ge=32, le=1024)
 
     # Path to the calibrated known/unknown direction vector produced by
     # scripts/train_probe.py. The service refuses to start without this file

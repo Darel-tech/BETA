@@ -1,8 +1,35 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------ */
+/* Verdict design tokens — defined once, reused everywhere              */
+/* ------------------------------------------------------------------ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a14;
+  --foreground: #ededed;
+
+  /* Verdict colours */
+  --verdict-trustworthy: #22c55e;
+  --verdict-trustworthy-bg: rgba(34, 197, 94, 0.12);
+  --verdict-trustworthy-border: rgba(34, 197, 94, 0.35);
+
+  --verdict-uncertain: #f59e0b;
+  --verdict-uncertain-bg: rgba(245, 158, 11, 0.12);
+  --verdict-uncertain-border: rgba(245, 158, 11, 0.35);
+
+  --verdict-needs-correction: #ef4444;
+  --verdict-needs-correction-bg: rgba(239, 68, 68, 0.12);
+  --verdict-needs-correction-border: rgba(239, 68, 68, 0.35);
+
+  /* Surface colours */
+  --surface-0: #0f1117;
+  --surface-1: #161b27;
+  --surface-2: #1e2535;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-default: rgba(255, 255, 255, 0.12);
+
+  /* Accent */
+  --accent: #22d3ee;
+  --accent-hover: #67e8f9;
 }
 
 @theme inline {
@@ -12,15 +39,48 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/* Always dark — the whole product is dark-mode-first */
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ------------------------------------------------------------------ */
+/* Loading skeleton animation                                           */
+/* ------------------------------------------------------------------ */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position:  400px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-1) 25%,
+    var(--surface-2) 50%,
+    var(--surface-1) 75%
+  );
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 6px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Verdict badge helpers                                                */
+/* ------------------------------------------------------------------ */
+.verdict-trustworthy {
+  color: var(--verdict-trustworthy);
+  background: var(--verdict-trustworthy-bg);
+  border: 1px solid var(--verdict-trustworthy-border);
+}
+.verdict-uncertain {
+  color: var(--verdict-uncertain);
+  background: var(--verdict-uncertain-bg);
+  border: 1px solid var(--verdict-uncertain-border);
+}
+.verdict-needs-correction {
+  color: var(--verdict-needs-correction);
+  background: var(--verdict-needs-correction-bg);
+  border: 1px solid var(--verdict-needs-correction-border);
 }

@@ -34,7 +34,7 @@ from fastapi.responses import JSONResponse
 from config import get_settings
 from model_loader import ModelLoadError, is_loaded, load_model_and_sae
 from sae_probe import ProbeNotCalibratedError, get_probe
-from schemas import CheckRequest, CheckResponse, HealthResponse
+from schemas import CheckRequest, CheckResponse, GenerateRequest, GenerateResponse, HealthResponse
 
 settings = get_settings()
 
@@ -134,6 +134,68 @@ async def health() -> HealthResponse:
         probe_calibrated=_startup_error is None,
         device=get_settings().device,
     )
+
+
+@app.post(
+    "/generate",
+    response_model=GenerateResponse,
+    dependencies=[Depends(verify_internal_api_key), Depends(enforce_rate_limit)],
+    summary="Generate a local Gemma-2-2B-it answer to a plain-text question.",
+)
+async def generate(payload: GenerateRequest, request: Request) -> GenerateResponse:
+    """
+    Runs a real Gemma-2-2B-it forward pass to produce an answer.
+    Used by the /api/compare router to fan-out to the local model.
+    Latency is measured with time.perf_counter() around the actual generation call.
+    """
+    request_id = str(uuid.uuid4())
+    start = time.perf_counter()
+
+    if _startup_error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service not ready.",
+        )
+
+    try:
+        loaded = load_model_and_sae()
+        model = loaded.model
+
+        # Build the chat-template prompt for Gemma-2-2B-it
+        messages = [{"role": "user", "content": payload.question}]
+        prompt = model.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+        import torch
+
+        input_ids = model.to_tokens(prompt)
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids,
+                max_new_tokens=settings.generate_max_new_tokens,
+                do_sample=False,  # greedy — deterministic, single forward pass
+                temperature=1.0,
+            )
+
+        # Decode only the new tokens (skip the prompt)
+        new_tokens = output_ids[0, input_ids.shape[-1]:]
+        answer = model.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    except Exception:
+        logger.exception("[%s] Unhandled error during generation", request_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error during generation.",
+        )
+
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    logger.info(
+        "[%s] generation latency_ms=%d answer_len=%d",
+        request_id, latency_ms, len(answer),
+    )
+    return GenerateResponse(answer=answer, latency_ms=latency_ms)
+
 
 
 @app.post(

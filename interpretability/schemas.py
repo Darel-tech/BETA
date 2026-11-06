@@ -64,3 +64,29 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     probe_calibrated: bool
     device: str
+
+
+class GenerateRequest(BaseModel):
+    """Request body for POST /generate — produce a Gemma answer."""
+
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="The question to generate an answer for.",
+    )
+
+    @field_validator("question")
+    @classmethod
+    def strip_question(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("question must not be empty or whitespace-only")
+        return v
+
+
+class GenerateResponse(BaseModel):
+    """Response body for POST /generate."""
+
+    answer: str
+    latency_ms: int = Field(..., ge=0)

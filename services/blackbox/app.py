@@ -227,6 +227,124 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
             signals=outcome.signals,
         )
 
+    # ── /generate — single answer from a closed model (for /api/compare) ─────
+    class GenerateRequest(BaseModel):
+        question: str = Field(..., max_length=8000)
+        source: str = Field(..., description='"chatgpt" or "claude"')
+
+    class GenerateResponse(BaseModel):
+        answer: str
+        latency_ms: float
+
+    @app.post("/generate", response_model=GenerateResponse)
+    async def generate_answer(payload: GenerateRequest) -> GenerateResponse:
+        """
+        Generate a single answer from ChatGPT or Claude.
+        Called by the Next.js /api/compare router during fan-out.
+        Uses the real provider SDK — never returns a cached or mock response.
+        """
+        from .resample_entropy import _api_key, _openai_caller, _anthropic_caller, DEFAULT_MAX_TOKENS
+
+        source_map = {"chatgpt": "openai", "claude": "anthropic"}
+        if payload.source not in source_map:
+            raise HTTPException(status_code=422, detail="source must be chatgpt or claude")
+
+        provider = source_map[payload.source]
+        started = time.perf_counter()
+
+        try:
+            if provider == "openai":
+                caller = _openai_caller(
+                    os.environ.get("BLACKBOX_OPENAI_MODEL", "gpt-4o-mini"), DEFAULT_MAX_TOKENS
+                )
+            else:
+                caller = _anthropic_caller(
+                    os.environ.get("BLACKBOX_ANTHROPIC_MODEL", "claude-haiku-5-5"), DEFAULT_MAX_TOKENS
+                )
+
+            answers = await run_in_threadpool(caller, payload.question, 1, 0.7)
+            answer = answers[0] if answers else ""
+        except BlackBoxError as exc:
+            raise HTTPException(status_code=502, detail={"error": exc.code, "message": str(exc)}) from exc
+        except Exception as exc:
+            logger.error("Generation failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Generation failed") from exc
+
+        return GenerateResponse(
+            answer=answer,
+            latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+        )
+
+    # ── /entail — cross-model NLI entailment for agreement computation ────────
+    class EntailPair(BaseModel):
+        model: str
+        answer: str
+
+    class EntailRequest(BaseModel):
+        answers: List[EntailPair] = Field(..., min_length=2)
+
+    class EntailResponse(BaseModel):
+        all_agree: bool
+        majority_cluster: str
+        outliers: List[str]
+
+    @app.post("/entail", response_model=EntailResponse)
+    async def cross_entail(payload: EntailRequest) -> EntailResponse:
+        """
+        Run bidirectional NLI between all pairs of model answers.
+        Returns the agreement label and outlier model names.
+        Real NLI inference — no string matching shortcuts.
+        """
+        from .entailment_check import CrossEncoderNLIScorer
+
+        pairs_input = payload.answers
+        if len(pairs_input) < 2:
+            raise HTTPException(status_code=422, detail="Need at least 2 answers")
+
+        scorer = CrossEncoderNLIScorer()
+        texts = [p.answer for p in pairs_input]
+        models_ = [p.model for p in pairs_input]
+
+        # Build all ordered pairs (a, b) for bidirectional entailment
+        nli_pairs = [
+            (texts[i], texts[j])
+            for i in range(len(texts))
+            for j in range(len(texts))
+            if i != j
+        ]
+
+        try:
+            raw = await run_in_threadpool(scorer.score, nli_pairs)
+        except Exception as exc:
+            logger.error("Cross-entailment failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="NLI inference failed") from exc
+
+        # Average entailment probability for each model (as "source")
+        n = len(texts)
+        avg_entail: Dict[str, float] = {}
+        pair_idx = 0
+        for i in range(n):
+            entail_scores = []
+            for j in range(n):
+                if i != j:
+                    entail_scores.append(raw[pair_idx][1])  # index 1 = entailment prob
+                    pair_idx += 1
+            avg_entail[models_[i]] = sum(entail_scores) / len(entail_scores) if entail_scores else 0.0
+
+        AGREE_THRESHOLD = 0.5
+        all_agree = all(v >= AGREE_THRESHOLD for v in avg_entail.values())
+        sorted_models = sorted(avg_entail.items(), key=lambda x: x[1])
+        outliers = [m for m, s in sorted_models if s < AGREE_THRESHOLD] if not all_agree else []
+
+        majority_cluster = max(avg_entail, key=lambda m: avg_entail[m])
+        majority_text = next(p.answer for p in pairs_input if p.model == majority_cluster)
+
+        return EntailResponse(
+            all_agree=all_agree,
+            majority_cluster=majority_text[:120],
+            outliers=outliers,
+        )
+
     return app
 
 
