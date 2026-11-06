@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CheckResponse",
+  "type": "object",
+  "required": ["verdict", "confidence", "evidence", "latency_ms"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["trustworthy", "uncertain", "needs_correction"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "latency_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "signals": {
+      "type": "object"
+    },
+    "clusters": {
+      "type": "array"
+    },
+    "entropy_semantic": {
+      "type": "number"
+    },
+    "entropy_naive": {
+      "type": "number"
+    },
+    "trace": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

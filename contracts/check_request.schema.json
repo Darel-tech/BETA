@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CheckRequest",
+  "type": "object",
+  "required": ["text", "source"],
+  "properties": {
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "enum": ["local-gemma", "chatgpt", "claude"]
+    },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "question": {
+      "type": "string"
+    },
+    "reference_facts": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

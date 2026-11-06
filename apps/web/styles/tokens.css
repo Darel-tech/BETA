@@ -1,0 +1,78 @@
+/* apps/web/styles/tokens.css */
+/* Design tokens for BETA neo-tactile & pastel glass design system */
+/* Section 10.2 in ANTIGRAVITY_BRIEF.md */
+
+:root {
+  /* color: brand + neutral + semantic */
+  --bg:            #EEF2FB;
+  --surface:       rgba(255, 255, 255, 0.72);
+  --surface-solid: #F7F9FF;
+  --border:        rgba(30, 60, 140, 0.10);
+  --text:          #0F1B3D;
+  --text-muted:    #5B6890;
+
+  --brand-500:     #2F6BFF;
+  --brand-600:     #1F54E0;
+  --brand-300:     #7FA6FF;
+  --brand-grad:    linear-gradient(135deg, #5B8CFF 0%, #2F6BFF 55%, #1E4FD8 100%);
+
+  /* Verdict Colors */
+  --ok:            #17B26A;  /* trustworthy */
+  --warn:          #F5A524;  /* uncertain */
+  --danger:        #E5484D;  /* needs_correction */
+
+  --ok-bg:         rgba(23, 178, 106, 0.12);
+  --ok-border:     rgba(23, 178, 106, 0.32);
+  --warn-bg:       rgba(245, 165, 36, 0.12);
+  --warn-border:   rgba(245, 165, 36, 0.32);
+  --danger-bg:     rgba(229, 72, 77, 0.12);
+  --danger-border: rgba(229, 72, 77, 0.32);
+
+  /* radius */
+  --r-sm:          12px;
+  --r-md:          20px;
+  --r-lg:          28px;
+  --r-pill:        999px;
+
+  /* spacing */
+  --space-1:       4px;
+  --space-2:       8px;
+  --space-3:       12px;
+  --space-4:       16px;
+  --space-6:       24px;
+  --space-8:       32px;
+  --space-12:      48px;
+
+  /* elevation & tactile shadows */
+  --shadow-1:      0 1px 2px rgba(20, 40, 100, 0.06), 0 6px 16px rgba(20, 40, 100, 0.06);
+  --shadow-2:      0 10px 30px rgba(20, 40, 100, 0.12);
+  --shadow-glow:   0 0 24px rgba(47, 107, 255, 0.35);
+  --inset:         inset 0 2px 6px rgba(20, 40, 100, 0.10);
+
+  /* glass blur */
+  --glass-blur:    18px;
+
+  /* motion */
+  --ease:          cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1:         120ms;
+  --dur-2:         220ms;
+  --dur-3:         420ms;
+}
+
+[data-theme="dark"] {
+  --bg:            #0A0F1F;
+  --surface:       rgba(20, 28, 56, 0.62);
+  --surface-solid: #121A33;
+  --border:        rgba(160, 190, 255, 0.12);
+  --text:          #EAF0FF;
+  --text-muted:    #9AA8D0;
+  --inset:         inset 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms;
+    --dur-2: 1ms;
+    --dur-3: 1ms;
+  }
+}
