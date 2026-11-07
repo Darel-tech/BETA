@@ -36,7 +36,7 @@ export const COPY = {
     dividerText: "or continue with",
     invalidCredentials: "That email or password doesn't match. Check them and try again, or reset your password.",
     consentTitle: "Before you start",
-    consentBody: "We record your email and how you use BETA (which checks you run, and when) so admins can keep the service running and fair. Your chat text stays private unless an admin reviews it for a stated reason, and every review is logged. You can export or delete your data in Settings.",
+    consentBody: "We record your email and how you use BETA (which checks you run, and when) so admins can keep the service running and fair. Closed-model answers are processed by Google and external inference providers. Your chat text stays private unless an admin reviews it for a stated reason, and every review is logged. You can export or delete your data in Settings.",
     consentAgree: "Agree and continue",
     consentDecline: "Not now",
   },

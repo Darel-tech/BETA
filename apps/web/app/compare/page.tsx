@@ -50,10 +50,10 @@ const verdictMeta: Record<
   },
 };
 
-const modelMeta: Record<string, { label: string; color: string }> = {
-  "local-gemma": { label: "Gemma 2-2B", color: "#a855f7" },
-  chatgpt: { label: "ChatGPT", color: "#22c55e" },
-  claude: { label: "Claude", color: "#f59e0b" },
+const modelMeta: Record<string, { label: string; color: string; provider?: string }> = {
+  "local-gemma": { label: "Gemma 2-2B (White-box)", color: "#a855f7", provider: "Local SAE" },
+  chatgpt: { label: "ChatGPT (via Groq / OpenRouter)", color: "#22c55e", provider: "Groq (Primary)" },
+  claude: { label: "Claude (via OpenRouter)", color: "#f59e0b", provider: "OpenRouter (:free)" },
 };
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -139,8 +139,15 @@ function ResultCard({ result }: { result: ModelResult }) {
       style={{ background: "var(--surface-1)", borderColor: "var(--border-default)" }}>
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div className="font-bold text-sm" style={{ color: meta.color }}>
-          {meta.label}
+        <div>
+          <div className="font-bold text-sm" style={{ color: meta.color }}>
+            {meta.label}
+          </div>
+          {meta.provider && (
+            <div className="text-[10px] text-slate-400 font-mono">
+              Provider: {meta.provider}
+            </div>
+          )}
         </div>
         <div className="text-xs" style={{ color: "#475569" }}>
           {result.latency_ms}ms
