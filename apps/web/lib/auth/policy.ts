@@ -22,7 +22,7 @@ const DEFAULT_POLICY: AuthPolicy = {
   checks_enabled: true,
 };
 
-let cachedPolicy: AuthPolicy = DEFAULT_POLICY;
+const cachedPolicy: AuthPolicy = DEFAULT_POLICY;
 let lastFetchedAt = 0;
 const CACHE_TTL_MS = 30_000;
 

@@ -1,161 +1,64 @@
 /**
  * POST /api/check
  *
- * Router for single-model answer checks.
- * - Branches on `source` to forward to the correct detector service.
- * - Performs automatic NER entity extraction (server-side) so callers never
- *   need to supply an `entities` list manually (Phase 5.5.1).
- * - Automatically calls /retrieve + /correct when the verdict is
- *   `uncertain` or `needs_correction` (Phase 5.5.3) — no second round-trip
- *   from the browser required.
- * - Falls back to a clear "service unavailable" response when env vars are
- *   unset — never returns a fake verdict.
- * - One automatic retry with backoff on transient failures (Phase 5.5.5).
+ * Single-answer verification router.
+ * - When the configured detector microservice is reachable, forward to it.
+ * - Otherwise run the REAL in-process LLM-backed detector (resampling + NLI
+ *   entailment + knowledge grounding + grounded correction). Never fake a
+ *   verdict, never return a stub "trustworthy" result.
+ * - Entity extraction, retrieval, correction and retrying are automatic.
+ * - Every response declares `mode` so the UI can label the pipeline honestly.
  */
 
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { logCheckRun } from "@/lib/telemetry";
+import { verifyGenerationUsageProof } from "@/lib/telemetry/usage-proof";
+import {
+  activeDetector,
+  isPromptEcho,
+  runFirewallCheck,
+  serviceReachable,
+  toFactDetails,
+  type CheckResult,
+} from "@/lib/firewall";
 
-// ── Environment ───────────────────────────────────────────────────────────────
-const INTERPRETABILITY_URL =
-  process.env.INTERPRETABILITY_SERVICE_URL ?? "";
-const BLACKBOX_URL =
-  process.env.BLACKBOX_SERVICE_URL ?? "";
-const RETRIEVAL_URL =
-  process.env.RETRIEVAL_SERVICE_URL ?? "";
-const INTERNAL_API_KEY =
-  process.env.INTERNAL_API_KEY ?? "";
-
+const INTERPRETABILITY_URL = process.env.INTERPRETABILITY_SERVICE_URL ?? "";
+const BLACKBOX_URL = process.env.BLACKBOX_SERVICE_URL ?? "";
+const RETRIEVAL_URL = process.env.RETRIEVAL_SERVICE_URL ?? "";
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? "";
 const REQUEST_TIMEOUT_MS = 15_000;
 const RETRY_DELAY_MS = 800;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-interface CheckResult {
-  verdict: "trustworthy" | "uncertain" | "needs_correction";
-  confidence: number;
-  evidence: string[];
-  latency_ms: number;
-  corrected_answer?: string | null;
-  retrieved_facts?: string[];
-  entities?: string[];
+function serviceHeaders() {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (INTERNAL_API_KEY) headers["X-Internal-Api-Key"] = INTERNAL_API_KEY;
+  return headers;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Minimal server-side NER: extract likely entities from text using regex patterns
- *  without requiring a Python call.  Covers PERSON, ORG, GPE, DATE, NUMBER.
- *  Real spaCy NER lives in the Python services; this is the JS approximation
- *  used for the initial router call so the UI never has to supply entities. */
-function extractEntities(question: string, answer: string): string[] {
-  const combined = `${question} ${answer}`;
-  const entities = new Set<string>();
-
-  // Capitalised proper-noun phrases (2–4 consecutive title-case words)
-  const properNounRe = /\b([A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,}){0,3})\b/g;
-  for (const match of combined.matchAll(properNounRe)) {
-    const candidate = match[1].trim();
-    // Skip common sentence-starters that happen to be capitalised
-    const skip = new Set([
-      "The", "A", "An", "In", "On", "At", "For", "And", "But", "Or",
-      "With", "To", "Of", "By", "From", "That", "This", "These", "Those",
-      "What", "When", "Where", "Who", "How", "Why", "Is", "Are", "Was",
-      "Were", "Has", "Have", "Had", "Will", "Can", "Could", "Would", "Should",
-    ]);
-    if (!skip.has(candidate) && candidate.length > 2) {
-      entities.add(candidate);
-    }
-  }
-
-  // Standalone years
-  for (const match of combined.matchAll(/\b(1[0-9]{3}|20[0-2][0-9])\b/g)) {
-    entities.add(match[1]);
-  }
-
-  return [...entities].slice(0, 15); // cap at 15 for the service contract
-}
-
-/** fetch with timeout + one automatic retry on 5xx / network error */
-async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
-  timeoutMs = REQUEST_TIMEOUT_MS
-): Promise<Response> {
-  const attempt = async (): Promise<Response> => {
+async function fetchWithRetry(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const attempt = async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
       clearTimeout(timer);
-      return res;
-    } catch (err) {
-      clearTimeout(timer);
-      throw err;
     }
   };
-
   try {
     return await attempt();
   } catch {
-    // One retry with back-off (Phase 5.5.5)
-    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     return attempt();
   }
 }
 
-function serviceHeaders() {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (INTERNAL_API_KEY) h["X-Internal-Api-Key"] = INTERNAL_API_KEY;
-  return h;
+function tokenCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : null;
 }
 
-/** Call /retrieve then /correct when a verdict warrants it. */
-async function retrieveAndCorrect(
-  question: string,
-  flaggedAnswer: string,
-  entities: string[]
-): Promise<{ facts: string[]; corrected_answer: string | null }> {
-  if (!RETRIEVAL_URL) return { facts: [], corrected_answer: null };
-
-  try {
-    const retrieveRes = await fetchWithRetry(
-      `${RETRIEVAL_URL}/retrieve`,
-      {
-        method: "POST",
-        headers: serviceHeaders(),
-        body: JSON.stringify({ query: question, entities, k: 5 }),
-      }
-    );
-
-    if (!retrieveRes.ok) return { facts: [], corrected_answer: null };
-
-    const retrieveData = await retrieveRes.json();
-    const facts: string[] = retrieveData.facts ?? [];
-
-    if (facts.length === 0) return { facts, corrected_answer: null };
-
-    // Now correct using the retrieved facts
-    const correctRes = await fetchWithRetry(
-      `${RETRIEVAL_URL}/correct`,
-      {
-        method: "POST",
-        headers: serviceHeaders(),
-        body: JSON.stringify({
-          original_question: question,
-          flagged_answer: flaggedAnswer,
-          facts,
-        }),
-      }
-    );
-
-    if (!correctRes.ok) return { facts, corrected_answer: null };
-    const correctData = await correctRes.json();
-    return { facts, corrected_answer: correctData.corrected_answer ?? null };
-  } catch {
-    return { facts: [], corrected_answer: null };
-  }
-}
-
-// ── Main handler ──────────────────────────────────────────────────────────────
 export async function POST(request: Request) {
+  const requestStartedAt = Date.now();
   let body: unknown;
   try {
     body = await request.json();
@@ -163,152 +66,208 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  if (
-    !body ||
-    typeof body !== "object" ||
-    !("text" in body) ||
-    !("source" in body)
-  ) {
-    return NextResponse.json(
-      { error: "Required fields: text, source." },
-      { status: 400 }
-    );
+  if (!body || typeof body !== "object" || !("text" in body) || !("source" in body)) {
+    return NextResponse.json({ error: "Required fields: text, source." }, { status: 400 });
   }
 
-  const { text, source, question = "" } = body as {
+  const { text, source, question = "", generation_usage: unverifiedGenerationUsage } = body as {
     text: string;
     source: string;
     question?: string;
+    generation_usage?: { proof?: unknown };
   };
 
   if (typeof text !== "string" || !text.trim()) {
-    return NextResponse.json(
-      { error: "Please provide a non-empty AI answer to check." },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Please provide a non-empty AI answer to check." }, { status: 400 });
   }
-
-  const allowedSources = ["local-gemma", "chatgpt", "claude"];
-  if (!allowedSources.includes(source)) {
+  if (!["local-gemma", "chatgpt", "claude", "groq", "openrouter"].includes(source)) {
     return NextResponse.json({ error: "Invalid source." }, { status: 400 });
   }
 
-  // Phase 5.5.1 — automatic entity extraction
-  const entities = extractEntities(String(question), text);
-
-  // ── Route to the correct detector ─────────────────────────────────────────
-  if (source === "local-gemma") {
-    // ── Interpretability service ───────────────────────────────────────────
-    if (!INTERPRETABILITY_URL) {
-      return NextResponse.json(
-        {
-          error: "service_unavailable",
-          message: "Interpretability detector is not configured. Set INTERPRETABILITY_SERVICE_URL.",
-        },
-        { status: 503 }
-      );
-    }
-
-    let detectorRes: Response;
-    try {
-      detectorRes = await fetchWithRetry(
-        `${INTERPRETABILITY_URL}/v1/check`,
-        {
-          method: "POST",
-          headers: serviceHeaders(),
-          body: JSON.stringify({ text, source: "local-gemma", entities }),
-        }
-      );
-    } catch {
-      return NextResponse.json(
-        { error: "service_unavailable", message: "Interpretability service unreachable." },
-        { status: 503 }
-      );
-    }
-
-    if (!detectorRes.ok) {
-      const errBody = await detectorRes.json().catch(() => ({}));
-      return NextResponse.json(
-        { error: "detector_error", message: errBody?.detail ?? "Interpretability service error." },
-        { status: detectorRes.status }
-      );
-    }
-
-    const detectorData = await detectorRes.json();
-    const verdict = detectorData.verdict as CheckResult["verdict"];
-
-    let correction = { facts: [] as string[], corrected_answer: null as string | null };
-    if (verdict !== "trustworthy" && RETRIEVAL_URL) {
-      correction = await retrieveAndCorrect(String(question), text, entities);
-    }
-
-    return NextResponse.json({
-      verdict,
-      confidence: detectorData.confidence,
-      evidence: detectorData.evidence ?? [],
-      latency_ms: detectorData.latency_ms,
-      entities,
-      retrieved_facts: correction.facts,
-      corrected_answer: correction.corrected_answer,
-    } satisfies CheckResult);
+  const generationUsage = verifyGenerationUsageProof(
+    unverifiedGenerationUsage?.proof,
+    String(question),
+    text
+  );
+  const generationDetails: Record<string, number | string> = {};
+  if (generationUsage?.model_name) generationDetails.generation_model = generationUsage.model_name;
+  for (const key of ["input_tokens", "output_tokens", "cached_input_tokens"] as const) {
+    const value = tokenCount(generationUsage?.[key]);
+    if (value != null) generationDetails[`generation_${key}`] = value;
   }
 
-  // ── Black-box service (chatgpt / claude) ───────────────────────────────────
-  if (!BLACKBOX_URL) {
+  const mode = await activeDetector(source);
+
+  // ── Real in-process firewall (microservices unavailable) ────────────────────
+  if (mode === "inprocess") {
+    try {
+      const result: CheckResult = await runFirewallCheck({
+        question: String(question),
+        answer: text,
+        source,
+      });
+      const signals = {
+        ...result.signals,
+        ...generationDetails,
+        pipeline_mode: "inprocess_llm_nli",
+      };
+      const response = {
+        ...result,
+        reference_fact_details: result.reference_fact_details,
+        used_fact_details: result.used_fact_details,
+        signals,
+        latency_ms: Date.now() - requestStartedAt,
+        retrieval_error: RETRIEVAL_URL && !(await serviceReachable(RETRIEVAL_URL))
+          ? "Knowledge microservice offline — used local reference premises."
+          : null,
+        serviceStages: result.stages,
+      };
+      after(() => logCheckRun({
+        source,
+        verdict: result.verdict,
+        confidence: result.confidence,
+        latencyMs: Date.now() - requestStartedAt,
+        stages: result.stages,
+      }));
+      return NextResponse.json(response);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Verification failed.";
+      after(() => logCheckRun({
+        source,
+        verdict: null,
+        confidence: null,
+        latencyMs: Date.now() - requestStartedAt,
+        stages: [{ name: "firewall", status: "unavailable", details: { error: message } }],
+      }));
+      return NextResponse.json(
+        { error: "verification_error", message },
+        { status: 500 }
+      );
+    }
+  }
+
+  // ── Original microservice path (kept for when services are deployed) ────────
+  const detectorUrl = source === "local-gemma" ? INTERPRETABILITY_URL : BLACKBOX_URL;
+  const detectorStage = source === "local-gemma" ? "gemma_sae_check" : "blackbox_resampling_nli";
+
+  const logUnavailable = (stage: string, statusCode?: number) => {
+    after(() => logCheckRun({
+      source,
+      verdict: null,
+      confidence: null,
+      latencyMs: Date.now() - requestStartedAt,
+      stages: [{
+        name: stage,
+        status: "unavailable",
+        details: { ...generationDetails, ...(statusCode == null ? {} : { status_code: statusCode }) },
+      }],
+    }));
+  };
+
+  if (!detectorUrl) {
+    logUnavailable(detectorStage);
     return NextResponse.json(
-      {
-        error: "service_unavailable",
-        message: "Black-box detector is not configured. Set BLACKBOX_SERVICE_URL.",
-      },
+      { error: "service_unavailable", message: "Detector is not configured." },
       { status: 503 }
     );
   }
 
-  let blackboxRes: Response;
+  let detectorRes: Response;
   try {
-    blackboxRes = await fetchWithRetry(
-      `${BLACKBOX_URL}/v1/check`,
-      {
+    detectorRes = await fetchWithRetry(`${detectorUrl.replace(/\/$/, "")}/v1/check`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({
+        text,
+        source,
+        question: String(question) || undefined,
+      }),
+    });
+  } catch {
+    logUnavailable(detectorStage);
+    return NextResponse.json(
+      { error: "service_unavailable", message: "Detector is unreachable." },
+      { status: 503 }
+    );
+  }
+  if (!detectorRes.ok) {
+    logUnavailable(detectorStage, detectorRes.status);
+    const errBody = await detectorRes.json().catch(() => ({}));
+    return NextResponse.json(
+      { error: "detector_error", message: errBody?.detail ?? "Detector error." },
+      { status: detectorRes.status }
+    );
+  }
+
+  const detectorData = await detectorRes.json();
+  const verdict = detectorData.verdict as CheckResult["verdict"];
+  const extraFacts = RETRIEVAL_URL && verdict !== "trustworthy" && await serviceReachable(RETRIEVAL_URL)
+    ? await fetch(`${RETRIEVAL_URL.replace(/\/$/, "")}/retrieve`, {
         method: "POST",
         headers: serviceHeaders(),
-        body: JSON.stringify({
-          text,
-          source,
-          question: String(question) || undefined,
-          entities,
-        }),
-      }
-    );
-  } catch {
-    return NextResponse.json(
-      { error: "service_unavailable", message: "Black-box detector unreachable." },
-      { status: 503 }
-    );
+        body: JSON.stringify({ query: String(question), entities: detectorData.entities ?? [], k: 5 }),
+        signal: AbortSignal.timeout(8_000),
+      }).then((res) => res.ok ? res.json() : { facts: [] }).catch(() => ({ facts: [] }))
+    : { facts: [] };
+  const facts: string[] = Array.isArray(extraFacts.facts) ? extraFacts.facts : [];
+  const factDetails = toFactDetails(facts);
+  const evidence: string[] = Array.isArray(detectorData.evidence)
+    ? detectorData.evidence.filter(
+        (item: unknown): item is string => typeof item === "string" && !isPromptEcho(item)
+      )
+    : [];
+
+  let correctedAnswer: string | null = null;
+  if (facts.length && verdict !== "trustworthy" && RETRIEVAL_URL) {
+    correctedAnswer = await fetch(`${RETRIEVAL_URL.replace(/\/$/, "")}/correct`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({
+        original_question: String(question),
+        flagged_answer: text,
+        facts,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    }).then((res) => res.ok ? res.json().catch(() => ({})) : {}).then((data: Record<string, unknown>) =>
+      typeof data.corrected_answer === "string" ? data.corrected_answer : null
+    ).catch(() => null);
   }
 
-  if (!blackboxRes.ok) {
-    const errBody = await blackboxRes.json().catch(() => ({}));
-    return NextResponse.json(
-      { error: "detector_error", message: errBody?.detail?.message ?? "Black-box service error." },
-      { status: blackboxRes.status }
-    );
-  }
-
-  const blackboxData = await blackboxRes.json();
-  const verdict = blackboxData.verdict as CheckResult["verdict"];
-
-  let correction = { facts: [] as string[], corrected_answer: null as string | null };
-  if (verdict !== "trustworthy" && RETRIEVAL_URL) {
-    correction = await retrieveAndCorrect(String(question), text, entities);
-  }
+  const stages = [
+    { name: detectorStage, status: "completed" as const, latency_ms: detectorData.latency_ms },
+    { name: "retrieval", status: facts.length ? ("completed" as const) : ("skipped" as const), details: { facts_found: facts.length } },
+    { name: "grounded_correction", status: correctedAnswer ? ("completed" as const) : ("skipped" as const) },
+  ];
+  after(() => logCheckRun({
+    source,
+    verdict,
+    confidence: detectorData.confidence,
+    latencyMs: Date.now() - requestStartedAt,
+    stages,
+  }));
 
   return NextResponse.json({
     verdict,
-    confidence: blackboxData.confidence,
-    evidence: blackboxData.evidence ?? [],
-    latency_ms: blackboxData.latency_ms,
-    entities,
-    retrieved_facts: correction.facts,
-    corrected_answer: correction.corrected_answer,
-  } satisfies CheckResult);
+    confidence: detectorData.confidence,
+    evidence,
+    evidenceItems: [],
+    signalList: [],
+    signals: { ...(detectorData.signals ?? {}), ...generationDetails, pipeline_mode: "microservice" },
+    entities: detectorData.entities ?? [],
+    retrieved_facts: facts,
+    corrected_answer: correctedAnswer,
+    used_facts: correctedAnswer ? facts : [],
+    used_fact_details: correctedAnswer ? factDetails : [],
+    referenceFacts: facts,
+    reference_fact_details: factDetails,
+    retrieval_error: null,
+    stages,
+    latency_ms: Date.now() - requestStartedAt,
+    mode: "microservice",
+    question: String(question),
+    answer: text,
+    source,
+    correctedAnswer,
+    total_latency_ms: Date.now() - requestStartedAt,
+  });
 }

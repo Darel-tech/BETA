@@ -16,6 +16,15 @@ def main():
     with results_file.open("r", encoding="utf-8") as file:
         data = json.load(file)
 
+    if (
+        data.get("schema_version") != 2
+        or not data.get("run_at")
+        or "mock" in str(data.get("note", "")).lower()
+    ):
+        print("Benchmark snapshot is stale, incomplete, or not from a live API run.")
+        print("Run eval/harness.py against the live API before scoring results.")
+        return
+
     rows = data.get("results", [])
 
     if not isinstance(rows, list) or not rows:
@@ -29,6 +38,7 @@ def main():
     tp = 0
     fp = 0
     fn = 0
+    tn = 0
 
     for row in rows:
         if not isinstance(row, dict):
@@ -58,6 +68,8 @@ def main():
             fp += 1
         elif expected == positive and predicted != positive:
             fn += 1
+        elif expected != positive and predicted != positive:
+            tn += 1
 
     if total == 0:
         print("No valid prediction rows found.")
@@ -79,10 +91,11 @@ def main():
     print(f"True positives: {tp}")
     print(f"False positives: {fp}")
     print(f"False negatives: {fn}")
+    print(f"True negatives: {tn}")
     print(f"Precision: {precision:.1%}")
     print(f"Recall: {recall:.1%}")
     print(f"F1 score: {f1:.1%}")
-    print("\nNote: Mock API results are not real AI detection performance.")
+    print("\nMetrics describe the labeled dataset and run; they are not calibrated probabilities.")
 
 
 if __name__ == "__main__":

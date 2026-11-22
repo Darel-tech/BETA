@@ -27,56 +27,90 @@ class ChunkRepository:
         entities: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Cosine similarity search via pgvector operator <=>.
-        Cosine distance d = embedding <=> query_embedding.
-        Cosine similarity = 1 - d.
-        Order is deterministic: similarity DESC, id ASC.
+        Fuse vector, full-text, and exact-entity candidate ranks with RRF.
+        The component rankings remain independent; this avoids comparing raw
+        cosine distances with full-text scores, which have different scales.
         """
+        entity_values = entities or []
+        entity_query = " OR ".join(
+            f'"{entity.replace(chr(34), "").strip()}"'
+            for entity in entity_values
+            if entity.strip()
+        )
         async with get_connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
-                # If entities are provided, filter or boost by entity_tag
-                if entities:
-                    query = """
-                        SELECT id, text, source, entity_tag,
-                               1 - (embedding <=> %s::vector) AS similarity
-                        FROM knowledge_chunks
-                        WHERE embedding IS NOT NULL
-                          AND entity_tag = ANY(%s)
-                        ORDER BY embedding <=> %s::vector, id ASC
-                        LIMIT %s;
-                    """
-                    await cur.execute(query, (query_embedding, entities, query_embedding, k))
-                    rows = await cur.fetchall()
-
-                    # Fallback if filtered results are fewer than requested k
-                    if len(rows) < k:
-                        remaining_k = k - len(rows)
-                        existing_ids = [r["id"] for r in rows] if rows else [-1]
-                        fallback_query = """
-                            SELECT id, text, source, entity_tag,
-                                   1 - (embedding <=> %s::vector) AS similarity
+                query = """
+                    WITH vector_candidates AS (
+                        SELECT id, ROW_NUMBER() OVER (ORDER BY distance, id) AS rank
+                        FROM (
+                            SELECT id, embedding <=> %s::vector AS distance
                             FROM knowledge_chunks
                             WHERE embedding IS NOT NULL
-                              AND id != ALL(%s)
-                            ORDER BY embedding <=> %s::vector, id ASC
-                            LIMIT %s;
-                        """
-                        await cur.execute(fallback_query, (query_embedding, existing_ids, query_embedding, remaining_k))
-                        fallback_rows = await cur.fetchall()
-                        rows.extend(fallback_rows)
-                else:
-                    query = """
-                        SELECT id, text, source, entity_tag,
-                               1 - (embedding <=> %s::vector) AS similarity
-                        FROM knowledge_chunks
-                        WHERE embedding IS NOT NULL
-                        ORDER BY embedding <=> %s::vector, id ASC
-                        LIMIT %s;
-                    """
-                    await cur.execute(query, (query_embedding, query_embedding, k))
-                    rows = await cur.fetchall()
-
-                return [dict(row) for row in rows]
+                            ORDER BY distance, id
+                            LIMIT 40
+                        ) AS nearest
+                    ), full_text_candidates AS (
+                        SELECT id, ROW_NUMBER() OVER (ORDER BY rank_score DESC, id) AS rank
+                        FROM (
+                            SELECT id, ts_rank_cd(
+                                search_vector, websearch_to_tsquery('english', %s)
+                            ) AS rank_score
+                            FROM knowledge_chunks
+                            WHERE search_vector @@ websearch_to_tsquery('english', %s)
+                            ORDER BY rank_score DESC, id
+                            LIMIT 40
+                        ) AS text_matches
+                    ), entity_candidates AS (
+                        SELECT id, ROW_NUMBER() OVER (ORDER BY rank_score DESC, id) AS rank
+                        FROM (
+                            SELECT id, ts_rank_cd(
+                                search_vector, websearch_to_tsquery('english', %s)
+                            ) + CASE WHEN entity_tag = ANY(%s) THEN 1.0 ELSE 0.0 END AS rank_score
+                            FROM knowledge_chunks
+                            WHERE entity_tag = ANY(%s)
+                               OR search_vector @@ websearch_to_tsquery('english', %s)
+                            ORDER BY rank_score DESC, id
+                            LIMIT 40
+                        ) AS entity_matches
+                    ), candidate_ids AS (
+                        SELECT id FROM vector_candidates
+                        UNION
+                        SELECT id FROM full_text_candidates
+                        UNION
+                        SELECT id FROM entity_candidates
+                    )
+                    SELECT chunk.id, chunk.text, chunk.source, chunk.entity_tag,
+                           COALESCE(1 - (chunk.embedding <=> %s::vector), 0) AS similarity
+                    FROM candidate_ids AS candidate
+                    JOIN knowledge_chunks AS chunk ON chunk.id = candidate.id
+                    LEFT JOIN vector_candidates AS vector ON vector.id = chunk.id
+                    LEFT JOIN full_text_candidates AS full_text ON full_text.id = chunk.id
+                    LEFT JOIN entity_candidates AS entity ON entity.id = chunk.id
+                    ORDER BY
+                        (chunk.entity_tag = ANY(%s)) DESC,
+                        COALESCE(1.0 / (60 + vector.rank), 0) +
+                        COALESCE(1.0 / (60 + full_text.rank), 0) +
+                        COALESCE(1.0 / (60 + entity.rank), 0) DESC,
+                        similarity DESC,
+                        chunk.id
+                    LIMIT %s;
+                """
+                await cur.execute(
+                    query,
+                    (
+                        query_embedding,
+                        query,
+                        query,
+                        entity_query,
+                        entity_values,
+                        entity_values,
+                        entity_query,
+                        query_embedding,
+                        entity_values,
+                        k,
+                    ),
+                )
+                return [dict(row) for row in await cur.fetchall()]
 
     async def insert_chunk(
         self,

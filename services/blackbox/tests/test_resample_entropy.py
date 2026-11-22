@@ -220,14 +220,16 @@ def _install_fake_openai(monkeypatch, *, fail=False):
     class Completions:
         def create(self, **kwargs):
             record["create"] = kwargs
+            record.setdefault("creates", []).append(kwargs)
             if fail:
                 raise RuntimeError("401 invalid key sk-test-secret")
             msg = lambda text: types.SimpleNamespace(message=types.SimpleNamespace(content=text))
             return types.SimpleNamespace(choices=[msg("one"), msg("two"), msg(None)])
 
     class OpenAI:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **options):
             record["api_key"] = api_key
+            record["client_options"] = options
             self.chat = types.SimpleNamespace(completions=Completions())
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=OpenAI))
@@ -241,6 +243,7 @@ def test_openai_caller_uses_sdk_with_expected_arguments(monkeypatch):
     raw = caller("What is 2+2?", 3, 0.4)
     assert raw == ["one", "two", ""]
     assert record["api_key"] == "sk-test-secret"
+    assert record["client_options"] == {"timeout": 15.0, "max_retries": 1}
     create = record["create"]
     assert create["model"] == "my-model"
     assert create["n"] == 3
@@ -274,8 +277,9 @@ def _install_fake_anthropic(monkeypatch, *, fail=False):
             return types.SimpleNamespace(content=blocks)
 
     class Anthropic:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **options):
             record["api_key"] = api_key
+            record["client_options"] = options
             self.messages = Messages()
 
     monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=Anthropic))
@@ -288,11 +292,33 @@ def test_anthropic_caller_makes_one_request_per_sample(monkeypatch):
     caller = make_provider_caller("anthropic", model="claude-test", max_tokens=77)
     raw = caller("Q?", 3, 0.9)
     assert raw == ["answer 1", "answer 2", "answer 3"]
+    assert record["client_options"] == {"timeout": 15.0, "max_retries": 1}
     assert len(record["calls"]) == 3
     first = record["calls"][0]
     assert first["model"] == "claude-test"
     assert first["max_tokens"] == 77
     assert first["temperature"] == 0.9
+
+
+@pytest.mark.parametrize(
+    ("provider", "env_name", "base_url", "model"),
+    [
+        ("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
+        ("openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "nvidia/nemotron-3.5-lightning:free"),
+    ],
+)
+def test_openai_compatible_providers_use_their_configured_endpoint(monkeypatch, provider, env_name, base_url, model):
+    monkeypatch.setenv(env_name, "test-provider-key")
+    record = _install_fake_openai(monkeypatch)
+    caller = make_provider_caller(provider, model=model, max_tokens=42)
+    assert caller("Q?", 3, 0.4) == ["one", "one", "one"]
+    assert record["api_key"] == "test-provider-key"
+    assert record["client_options"]["base_url"] == base_url
+    assert record["create"]["model"] == model
+    assert len(record["creates"]) == 3
+    assert all(create["n"] == 1 for create in record["creates"])
+    token_parameter = "max_completion_tokens" if provider == "groq" else "max_tokens"
+    assert all(create[token_parameter] == 42 for create in record["creates"])
 
 
 def test_anthropic_provider_failure_is_sanitised(monkeypatch):
@@ -309,6 +335,10 @@ def test_model_name_resolution_prefers_argument_then_env_then_default(monkeypatc
     monkeypatch.setenv("BLACKBOX_OPENAI_MODEL", "env-model")
     assert re_mod.resolve_model("openai") == "env-model"
     assert re_mod.resolve_model("openai", "arg-model") == "arg-model"
+    monkeypatch.setenv("GROQ_MODEL", "groq-model")
+    monkeypatch.setenv("OPENROUTER_MODEL", "router-model")
+    assert re_mod.resolve_model("groq") == "groq-model"
+    assert re_mod.resolve_model("openrouter") == "router-model"
 
 
 # ------------------------------------------------------- full measurement

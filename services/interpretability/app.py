@@ -194,7 +194,12 @@ async def generate(payload: GenerateRequest, request: Request) -> GenerateRespon
         "[%s] generation latency_ms=%d answer_len=%d",
         request_id, latency_ms, len(answer),
     )
-    return GenerateResponse(answer=answer, latency_ms=latency_ms)
+    return GenerateResponse(
+        answer=answer,
+        latency_ms=latency_ms,
+        input_tokens=int(input_ids.shape[-1]),
+        output_tokens=int(new_tokens.numel()),
+    )
 
 
 

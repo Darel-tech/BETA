@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
 from .decision_logic import Verdict
-from .detector import Detector
+from .detector import Detector, SOURCE_TO_PROVIDER
 from .entailment_check import DEFAULT_NLI_MODEL, MAX_FACTS, MAX_TEXT_CHARS
 from .errors import (
     BlackBoxError,
@@ -30,7 +30,7 @@ from .errors import (
     ModelError,
     ProviderError,
 )
-from .resample_entropy import DEFAULT_EMBEDDING_MODEL
+from .resample_entropy import DEFAULT_EMBEDDING_MODEL, is_api_key_configured
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class DetectRequest(BaseModel):
     """Request body for ``POST /detect`` and ``POST /v1/check``."""
 
     text: str = Field(..., description="The answer or claim to evaluate.", max_length=MAX_TEXT_CHARS)
-    source: Literal["chatgpt", "claude"] = Field(
+    source: Literal["chatgpt", "claude", "groq", "openrouter"] = Field(
         ..., description="Which LLM produced the text; selects the resampling provider."
     )
     question: Optional[str] = Field(
@@ -156,6 +156,12 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
     )
     app.state.detector = detector
     app.state.detector_lock = threading.Lock()
+    app.state.provider_health = {
+        "openai": "unverified",
+        "anthropic": "unverified",
+        "groq": "unverified",
+        "openrouter": "unverified",
+    }
 
     @app.exception_handler(BlackBoxError)
     async def _blackbox_error_handler(_: Request, exc: BlackBoxError) -> JSONResponse:
@@ -167,13 +173,23 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         """Service health. Does not load models or contact providers."""
+        provider_configuration = {
+            "openai": is_api_key_configured("OPENAI_API_KEY"),
+            "anthropic": is_api_key_configured("ANTHROPIC_API_KEY"),
+            "groq": is_api_key_configured("GROQ_API_KEY"),
+            "openrouter": is_api_key_configured("OPENROUTER_API_KEY"),
+        }
         return {
             "status": "ok",
             "service": "blackbox-detector",
             "version": __version__,
-            "providers_configured": {
-                "openai": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
-                "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+            "providers_configured": provider_configuration,
+            "providers": {
+                provider: {
+                    "configured": configured,
+                    "status": app.state.provider_health[provider] if configured else "unconfigured",
+                }
+                for provider, configured in provider_configuration.items()
             },
             "models": {
                 "embedding": os.environ.get("BLACKBOX_EMBEDDING_MODEL", "").strip()
@@ -208,6 +224,8 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
                 entities=payload.entities,
             )
         except BlackBoxError:
+            provider = SOURCE_TO_PROVIDER[payload.source]
+            app.state.provider_health[provider] = "degraded"
             raise  # handled by _blackbox_error_handler
         except Exception as exc:
             logger.error("Unexpected detection failure: %s", type(exc).__name__)
@@ -219,6 +237,8 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
                 },
             ) from None
 
+        provider = SOURCE_TO_PROVIDER[payload.source]
+        app.state.provider_health[provider] = "ok"
         return DetectResponse(
             verdict=outcome.decision.verdict,
             confidence=outcome.decision.confidence,
@@ -230,49 +250,55 @@ def create_app(detector: Optional[Detector] = None) -> FastAPI:
     # ── /generate — single answer from a closed model (for /api/compare) ─────
     class GenerateRequest(BaseModel):
         question: str = Field(..., max_length=8000)
-        source: str = Field(..., description='"chatgpt" or "claude"')
+        source: Literal["chatgpt", "claude", "groq", "openrouter"] = Field(...)
 
     class GenerateResponse(BaseModel):
         answer: str
         latency_ms: float
+        provider: str
+        model: str
+        input_tokens: Optional[int] = None
+        output_tokens: Optional[int] = None
+        cached_input_tokens: Optional[int] = None
 
     @app.post("/generate", response_model=GenerateResponse)
     async def generate_answer(payload: GenerateRequest) -> GenerateResponse:
         """
-        Generate a single answer from ChatGPT or Claude.
+        Generate a single answer from the selected real provider.
         Called by the Next.js /api/compare router during fan-out.
         Uses the real provider SDK — never returns a cached or mock response.
         """
-        from .resample_entropy import _api_key, _openai_caller, _anthropic_caller, DEFAULT_MAX_TOKENS
+        from .resample_entropy import DEFAULT_MAX_TOKENS, make_provider_caller, resolve_model
 
-        source_map = {"chatgpt": "openai", "claude": "anthropic"}
-        if payload.source not in source_map:
-            raise HTTPException(status_code=422, detail="source must be chatgpt or claude")
-
-        provider = source_map[payload.source]
+        provider = SOURCE_TO_PROVIDER[payload.source]
+        model_name = resolve_model(provider)
         started = time.perf_counter()
 
         try:
-            if provider == "openai":
-                caller = _openai_caller(
-                    os.environ.get("BLACKBOX_OPENAI_MODEL", "gpt-4o-mini"), DEFAULT_MAX_TOKENS
-                )
-            else:
-                caller = _anthropic_caller(
-                    os.environ.get("BLACKBOX_ANTHROPIC_MODEL", "claude-haiku-5-5"), DEFAULT_MAX_TOKENS
-                )
-
+            caller = make_provider_caller(provider, model=model_name, max_tokens=DEFAULT_MAX_TOKENS)
             answers = await run_in_threadpool(caller, payload.question, 1, 0.7)
             answer = answers[0] if answers else ""
         except BlackBoxError as exc:
+            app.state.provider_health[provider] = "degraded"
             raise HTTPException(status_code=502, detail={"error": exc.code, "message": str(exc)}) from exc
         except Exception as exc:
             logger.error("Generation failed: %s", type(exc).__name__)
             raise HTTPException(status_code=500, detail="Generation failed") from exc
 
+        app.state.provider_health[provider] = "ok"
         return GenerateResponse(
             answer=answer,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            provider={
+                "openai": "OpenAI",
+                "anthropic": "Anthropic",
+                "groq": "Groq",
+                "openrouter": "OpenRouter",
+            }[provider],
+            model=model_name,
+            input_tokens=getattr(answers, "input_tokens", None),
+            output_tokens=getattr(answers, "output_tokens", None),
+            cached_input_tokens=getattr(answers, "cached_input_tokens", None),
         )
 
     # ── /entail — cross-model NLI entailment for agreement computation ────────

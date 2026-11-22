@@ -87,14 +87,16 @@ Response:
    ```bash
    python scripts/migrate.py
    ```
-4. Ingest sample knowledge facts:
+4. Load a real Wikipedia knowledge subset:
    ```bash
-   python scripts/ingest.py --file sample_facts.jsonl
+   python embed_pipeline.py --count 2000
    ```
 5. Start service:
    ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   python scripts/run_local.py
    ```
+   The app router expects retrieval at `http://localhost:8003`. On Windows,
+   use this launcher so async psycopg runs with a Selector event loop.
 
 ## Running Tests & Benchmarks
 ```bash

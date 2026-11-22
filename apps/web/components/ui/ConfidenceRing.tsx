@@ -1,5 +1,6 @@
 import React from "react";
 
+/** BoldKit confidence ring. Clamping and thresholds are unchanged. */
 export function ConfidenceRing({
   value,
   size = 48,
@@ -16,24 +17,23 @@ export function ConfidenceRing({
 
   const color =
     clamped >= 0.75
-      ? "var(--ok)"
+      ? "var(--bk-success)"
       : clamped >= 0.45
-      ? "var(--warn)"
-      : "var(--danger)";
+        ? "var(--bk-warning)"
+        : "var(--bk-risk)";
 
   return (
     <div
       className="relative inline-flex items-center justify-center"
       style={{ width: size, height: size }}
     >
-      <svg width={size} height={size} className="transform -rotate-90">
+      <svg width={size} height={size} className="transform -rotate-90" aria-hidden="true">
         <circle
           cx={size / 2}
           cy={size / 2}
           r={radius}
-          stroke="currentColor"
+          stroke="var(--bk-paper)"
           strokeWidth={strokeWidth}
-          className="text-white/10"
           fill="transparent"
         />
         <circle
@@ -42,14 +42,14 @@ export function ConfidenceRing({
           r={radius}
           stroke={color}
           strokeWidth={strokeWidth}
+          strokeLinecap="butt"
+          fill="transparent"
           strokeDasharray={circumference}
           strokeDashoffset={offset}
-          strokeLinecap="round"
-          fill="transparent"
-          style={{ transition: "stroke-dashoffset 0.4s ease" }}
+          style={{ transition: "stroke-dashoffset 400ms ease" }}
         />
       </svg>
-      <span className="absolute text-xs font-mono font-bold" style={{ color }}>
+      <span className="absolute font-mono text-[10px] font-black text-[var(--bk-ink)]">
         {Math.round(clamped * 100)}%
       </span>
     </div>

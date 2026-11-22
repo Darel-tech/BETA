@@ -1,5 +1,9 @@
 import React from "react";
 
+/**
+ * BoldKit panel wrapper. Keeps the original props so existing callers do not
+ * need to change; only the visual shell is replaced.
+ */
 export function GlassPanel({
   children,
   className = "",
@@ -13,17 +17,9 @@ export function GlassPanel({
   inset?: boolean;
   onClick?: () => void;
 }) {
+  const tone = elevated ? "bk-frame bk-card bk-press" : inset ? "bk-frame bk-frame--thin" : "bk-frame";
   return (
-    <div
-      onClick={onClick}
-      className={`rounded-2xl border transition-all ${
-        elevated
-          ? "shadow-2xl border-white/15 bg-slate-900/60 backdrop-blur-xl"
-          : inset
-          ? "border-white/5 bg-slate-950/40 shadow-inner"
-          : "border-white/10 bg-slate-900/40 backdrop-blur-md"
-      } ${className}`}
-    >
+    <div onClick={onClick} className={`${tone} ${className}`}>
       {children}
     </div>
   );

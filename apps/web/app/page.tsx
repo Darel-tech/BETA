@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { BkNav, BkBadge, BkCard, BkButton } from "@/components/ui/BoldKit";
 
 export default function Home() {
   const router = useRouter();
@@ -33,123 +34,95 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center px-6 py-16"
-      style={{ background: "var(--background)" }}>
-      {/* Nav */}
-      <nav className="fixed top-0 left-0 right-0 flex items-center justify-between px-6 py-3 border-b z-50"
-        style={{ background: "rgba(10,10,20,0.9)", borderColor: "var(--border-subtle)", backdropFilter: "blur(12px)" }}>
-        <span className="font-bold tracking-widest text-sm" style={{ color: "var(--accent)" }}>BETA</span>
-        <div className="flex items-center gap-4 text-sm" style={{ color: "#94a3b8" }}>
-          <a href="/compare" className="hover:text-white transition-colors">Compare</a>
-          <a href="/dashboard" className="hover:text-white transition-colors">Dashboard</a>
-          <a href="/status" className="hover:text-white transition-colors">Status</a>
-        </div>
-      </nav>
+    <div className="bk-app">
+      <BkNav active="home" />
 
-      <div className="max-w-2xl w-full text-center mt-10">
-        {/* Badge */}
-        <span className="inline-block text-xs font-semibold tracking-[0.3em] px-3 py-1 rounded-full mb-6"
-          style={{ background: "var(--verdict-trustworthy-bg)", color: "var(--accent)", border: "1px solid var(--border-default)" }}>
-          AI HALLUCINATION FIREWALL
-        </span>
+      <main className="mx-auto flex w-full max-w-5xl flex-col items-center px-5 pb-20 pt-14 text-center sm:px-8">
+        <div className="max-w-2xl w-full">
+          <BkBadge tone="success" className="mb-6">
+            AI HALLUCINATION FIREWALL
+          </BkBadge>
 
-        <h1 className="text-5xl md:text-6xl font-bold mb-5 leading-tight">
-          Ask once.{" "}
-          <span style={{ color: "var(--accent)" }}>Verify everything.</span>
-        </h1>
+          <h1 className="text-5xl font-black leading-tight tracking-tight text-[var(--bk-ink)] md:text-6xl">
+            Ask once.{" "}
+            <span className="text-[var(--bk-brand-text)]">Verify everything.</span>
+          </h1>
 
-        <p className="text-lg mb-4" style={{ color: "#94a3b8" }}>
-          BETA sends your question to Gemma, ChatGPT, and Claude — then
-          fact-checks all three answers against a real knowledge base and shows
-          you a side-by-side verdict.
-        </p>
+          <p className="mt-5 text-base leading-relaxed text-[var(--bk-muted)]">
+            BETA sends your question to Gemma, Groq, and OpenRouter — then
+            fact-checks all three answers against a real knowledge base and shows
+            you a side-by-side verdict.
+          </p>
 
-        {/* Verdict legend */}
-        <div className="flex justify-center gap-4 flex-wrap mb-10 text-sm">
-          {[
-            { label: "Trustworthy", cls: "verdict-trustworthy" },
-            { label: "Uncertain", cls: "verdict-uncertain" },
-            { label: "Needs correction", cls: "verdict-needs-correction" },
-          ].map((v) => (
-            <span key={v.label} className={`${v.cls} px-3 py-1 rounded-full text-xs font-semibold`}>
-              {v.label}
-            </span>
-          ))}
-        </div>
-
-        {/* Input */}
-        <form onSubmit={handleSubmit} className="relative">
-          <div className="rounded-2xl border p-1"
-            style={{ background: "var(--surface-1)", borderColor: "var(--border-default)" }}>
-            <textarea
-              ref={textareaRef}
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask anything… e.g. When did the Berlin Wall fall?"
-              rows={2}
-              disabled={loading}
-              className="w-full resize-none rounded-xl px-4 pt-3 pb-2 text-base outline-none disabled:opacity-60"
-              style={{
-                background: "transparent",
-                color: "var(--foreground)",
-                minHeight: "56px",
-                maxHeight: "200px",
-              }}
-            />
-            <div className="flex items-center justify-between px-3 pb-2">
-              <span className="text-xs" style={{ color: "#475569" }}>
-                Press <kbd className="px-1 rounded text-xs"
-                  style={{ background: "var(--surface-2)", color: "#94a3b8" }}>Enter</kbd> to compare all models
-              </span>
-              <button
-                type="submit"
-                disabled={!question.trim() || loading}
-                className="rounded-xl px-5 py-2 text-sm font-bold disabled:opacity-40 transition-all"
-                style={{ background: "var(--accent)", color: "#0a0a14" }}
-              >
-                {loading ? "Sending…" : "Compare ↗"}
-              </button>
-            </div>
+          <div className="mt-8 flex flex-wrap justify-center gap-3 text-sm">
+            <BkBadge tone="success">Trustworthy</BkBadge>
+            <BkBadge tone="warning">Uncertain</BkBadge>
+            <BkBadge tone="risk">Needs correction</BkBadge>
           </div>
-        </form>
 
-        <p className="mt-4 text-xs" style={{ color: "#334155" }}>
-          No manual model selection · No entity list · No separate fact-check button
-        </p>
+          <form onSubmit={handleSubmit} className="mt-10">
+            <div className="bk-frame bg-[var(--bk-paper)] p-2">
+              <textarea
+                ref={textareaRef}
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask anything… e.g. When did the Berlin Wall fall?"
+                rows={2}
+                disabled={loading}
+                className="bk-input min-h-14 max-h-52 w-full resize-none border-0 shadow-none focus:translate-x-0 focus:translate-y-0"
+                style={{ minHeight: "56px", maxHeight: "200px" }}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3 px-3 pb-2 pt-1">
+                <span className="text-[11px] text-[var(--bk-muted)]">
+                  Press <kbd className="bk-badge bk-badge--paper mx-1">Enter</kbd> to compare all models
+                </span>
+                <BkButton type="submit" disabled={!question.trim() || loading}>
+                  {loading ? "Sending…" : "Compare ↗"}
+                </BkButton>
+              </div>
+            </div>
+          </form>
 
-        {/* Architecture card */}
-        <div className="mt-16 rounded-2xl border p-6 text-left"
-          style={{ background: "var(--surface-1)", borderColor: "var(--border-subtle)" }}>
-          <h2 className="text-sm font-semibold mb-4" style={{ color: "#64748b" }}>HOW IT WORKS</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <p className="mt-4 text-[11px] text-[var(--bk-muted)]">
+            No manual model selection · No entity list · No separate fact-check button
+          </p>
+        </div>
+
+        <BkCard tone="insight" className="mt-16 w-full text-left">
+          <p className="bk-eyebrow mb-5">HOW IT WORKS</p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             {[
               {
                 step: "01",
                 title: "Multi-model generation",
                 desc: "Your question is sent in parallel to Gemma-2-2B (local SAE inference), GPT-4o-mini, and Claude Haiku.",
+                tone: "brand" as const,
               },
               {
                 step: "02",
                 title: "Hallucination detection",
                 desc: "Each answer is scored — Gemma via SAE known-ness probes, ChatGPT/Claude via semantic-entropy resampling + NLI.",
+                tone: "warning" as const,
               },
               {
                 step: "03",
                 title: "Grounded correction",
                 desc: "Flagged answers are cross-checked against a 2 000+ passage Wikipedia knowledge base and corrected with citations.",
+                tone: "evidence" as const,
               },
             ].map((card) => (
-              <div key={card.step} className="rounded-xl p-4"
-                style={{ background: "var(--surface-2)" }}>
-                <div className="text-xs font-mono mb-2" style={{ color: "var(--accent)" }}>{card.step}</div>
-                <div className="font-semibold mb-1 text-sm">{card.title}</div>
-                <div className="text-xs leading-relaxed" style={{ color: "#64748b" }}>{card.desc}</div>
+              <div key={card.step} className="bk-frame--thin border bg-[var(--bk-paper)] p-4">
+                <div className={`bk-label mb-2 ${card.tone === "warning" ? "text-[var(--bk-warning-text)]" : card.tone === "evidence" ? "text-[var(--bk-evidence-text)]" : "text-[var(--bk-brand-text)]"}`}>
+                  {card.step}
+                </div>
+                <div className="text-sm font-black text-[var(--bk-ink)]">{card.title}</div>
+                <div className="mt-2 text-xs leading-relaxed text-[var(--bk-muted)]">{card.desc}</div>
               </div>
             ))}
           </div>
-        </div>
-      </div>
-    </main>
+        </BkCard>
+      </main>
+    </div>
   );
 }

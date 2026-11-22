@@ -36,7 +36,12 @@ from .entailment_check import (
 from .errors import InputValidationError
 from .resample_entropy import ConsistencyResult, measure_consistency
 
-SOURCE_TO_PROVIDER: Dict[str, str] = {"chatgpt": "openai", "claude": "anthropic"}
+SOURCE_TO_PROVIDER: Dict[str, str] = {
+    "chatgpt": "openai",
+    "claude": "anthropic",
+    "groq": "groq",
+    "openrouter": "openrouter",
+}
 
 #: ``(question, provider) -> ConsistencyResult``
 ConsistencyFn = Callable[[str, str], ConsistencyResult]
@@ -161,7 +166,11 @@ class Detector:
 
         signals: Dict[str, Any] = dict(decision.signals)
         signals["provider"] = provider
+        signals["model"] = consistency.model if consistency else None
         signals["sample_count"] = consistency.sample_count if consistency else 0
+        signals["input_tokens"] = consistency.input_tokens if consistency else None
+        signals["output_tokens"] = consistency.output_tokens if consistency else None
+        signals["cached_input_tokens"] = consistency.cached_input_tokens if consistency else None
         signals["entities"] = list(entities) if entities else []
         signals["fact_results"] = (
             [

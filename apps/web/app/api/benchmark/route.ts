@@ -2,8 +2,9 @@
  * GET /api/benchmark
  *
  * Serves the benchmark results produced by eval/harness.py from disk.
- * The dashboard reads this route — if no results exist yet, it returns a 404
- * so the dashboard can show "run harness first" rather than stale/fake data.
+ * The dashboard treats this as optional: when no valid snapshot exists the
+ * route answers 200 with `available: false` so the browser console stays clean
+ * and no stale/fake data is shown.
  */
 
 import { NextResponse } from "next/server";
@@ -17,13 +18,22 @@ export async function GET() {
   try {
     const raw = await readFile(resultsPath, "utf-8");
     const data = JSON.parse(raw);
+    if (data.schema_version !== 2 || !Array.isArray(data.results) || !data.run_at || data.questions_evaluated < 1) {
+      return NextResponse.json(
+        {
+          available: false,
+          error: "Benchmark snapshot is stale or incomplete. Run eval/harness.py against the live API.",
+        },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
     return NextResponse.json(data, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch {
     return NextResponse.json(
-      { error: "No benchmark results found. Run eval/harness.py first." },
-      { status: 404, headers: { "Cache-Control": "no-store" } }
+      { available: false, error: "No benchmark results found. Run eval/harness.py first." },
+      { headers: { "Cache-Control": "no-store" } }
     );
   }
 }
