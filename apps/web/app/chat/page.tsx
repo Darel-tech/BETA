@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
+import { useAuth } from "@/lib/auth/context";
 import { COPY } from "@/lib/copy";
 import { TactileButton } from "@/components/ui/TactileButton";
 import { VerdictChip } from "@/components/ui/VerdictChip";
@@ -21,6 +22,7 @@ interface Message {
 }
 
 export default function ChatPage() {
+  const { user, logout } = useAuth();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "m-1",
@@ -149,10 +151,15 @@ export default function ChatPage() {
 
         {/* User Footer */}
         <div className="pt-4 border-t border-white/10 flex items-center justify-between text-xs px-2 text-slate-400">
-          <span>Protected Session</span>
-          <Link href="/login" className="hover:text-white">
+          <span className="truncate max-w-[120px]" title={user?.username ?? "User"}>
+            {user?.username ?? "Protected Session"}
+          </span>
+          <button
+            onClick={() => logout()}
+            className="hover:text-red-400 text-slate-400 cursor-pointer bg-transparent border-none p-0 transition-colors"
+          >
             Sign out
-          </Link>
+          </button>
         </div>
       </aside>
 

@@ -7,3 +7,6 @@ __pycache__/
 venv/
 .neon
 node_modules/
+*.db
+*.db-shm
+*.db-wal

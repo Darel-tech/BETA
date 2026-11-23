@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { ProfileMenu } from "@/components/ui/ProfileMenu";
 
 export default function Home() {
   const router = useRouter();
@@ -40,6 +41,7 @@ export default function Home() {
         style={{ background: "rgba(10,10,20,0.9)", borderColor: "var(--border-subtle)", backdropFilter: "blur(12px)" }}>
         <span className="font-bold tracking-widest text-sm" style={{ color: "var(--accent)" }}>BETA</span>
         <div className="flex items-center gap-4 text-sm" style={{ color: "#94a3b8" }}>
+          <ProfileMenu />
           <a href="/compare" className="hover:text-white transition-colors">Compare</a>
           <a href="/dashboard" className="hover:text-white transition-colors">Dashboard</a>
           <a href="/status" className="hover:text-white transition-colors">Status</a>

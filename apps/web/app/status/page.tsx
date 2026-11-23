@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ProfileMenu } from "@/components/ui/ProfileMenu";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface ServiceStatus {
@@ -121,6 +122,7 @@ export default function StatusPage() {
           BETA
         </a>
         <div className="flex items-center gap-4 text-sm" style={{ color: "#94a3b8" }}>
+          <ProfileMenu />
           <a href="/compare" className="hover:text-white transition-colors">Compare</a>
           <a href="/dashboard" className="hover:text-white transition-colors">Dashboard</a>
           <a href="/status" className="hover:text-white transition-colors font-semibold" style={{ color: "var(--accent)" }}>

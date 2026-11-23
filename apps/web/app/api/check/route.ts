@@ -13,7 +13,9 @@
  * - One automatic retry with backoff on transient failures (Phase 5.5.5).
  */
 
-import { NextResponse } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
+import { getSession } from "@/lib/auth/middleware";
+import { logQueryCheck } from "@/lib/audit";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const INTERPRETABILITY_URL =
@@ -155,7 +157,8 @@ async function retrieveAndCorrect(
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const session = await getSession(request);
   let body: unknown;
   try {
     body = await request.json();
@@ -242,6 +245,18 @@ export async function POST(request: Request) {
       correction = await retrieveAndCorrect(String(question), text, entities);
     }
 
+    await logQueryCheck({
+      userId: session ? Number(session.sub) : null,
+      question: String(question),
+      sourceModel: "local-gemma",
+      verdict,
+      confidence: detectorData.confidence,
+      evidenceCount: (detectorData.evidence ?? []).length,
+      latencyMs: detectorData.latency_ms,
+      wasCorrected: verdict !== "trustworthy" && !!correction.corrected_answer,
+      correctedAnswer: correction.corrected_answer,
+    });
+
     return NextResponse.json({
       verdict,
       confidence: detectorData.confidence,
@@ -301,6 +316,18 @@ export async function POST(request: Request) {
   if (verdict !== "trustworthy" && RETRIEVAL_URL) {
     correction = await retrieveAndCorrect(String(question), text, entities);
   }
+
+  await logQueryCheck({
+    userId: session ? Number(session.sub) : null,
+    question: String(question),
+    sourceModel: source,
+    verdict,
+    confidence: blackboxData.confidence,
+    evidenceCount: (blackboxData.evidence ?? []).length,
+    latencyMs: blackboxData.latency_ms,
+    wasCorrected: verdict !== "trustworthy" && !!correction.corrected_answer,
+    correctedAnswer: correction.corrected_answer,
+  });
 
   return NextResponse.json({
     verdict,
