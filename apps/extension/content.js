@@ -122,7 +122,9 @@
       .filter((l) => l.trim() && l.trim() !== "ChatGPT said:")
       .join("\n")
       .trim();
-    return text ? { el: latest, text } : null;
+    const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+    const question = userMessages[userMessages.length - 1]?.innerText?.trim() ?? "";
+    return text ? { el: latest, text, question } : null;
   }
 
   function getLatestClaudeReply() {
@@ -131,7 +133,9 @@
     const latest = messages[messages.length - 1];
     const textEl = latest.querySelector("[data-perf-reply-text]") ?? latest;
     const text = textEl.innerText?.trim();
-    return text ? { el: latest, text } : null;
+    const userMessages = document.querySelectorAll('[data-testid="user-message"]');
+    const question = userMessages[userMessages.length - 1]?.innerText?.trim() ?? "";
+    return text ? { el: latest, text, question } : null;
   }
 
   // ── Core watcher factory ───────────────────────────────────────────────────
@@ -139,30 +143,31 @@
   function watchReplies(source, getLatestReply) {
     injectBadgeStyles();
 
-    let lastCheckedText = "";
+    let lastCheckedSignature = "";
     let debounceTimer = null;
     let inflightText = null;
 
     async function handleStableReply() {
       const reply = getLatestReply();
       if (!reply) return;
-      const { el, text } = reply;
+      const { el, text, question } = reply;
+      const signature = `${question}\u0000${text}`;
 
       // Skip if we already checked this exact text
-      if (text === lastCheckedText || text === inflightText) return;
+      if (signature === lastCheckedSignature || signature === inflightText) return;
 
-      inflightText = text;
-      upsertBadge(el, "loading", null, null);
+      inflightText = signature;
+      upsertBadge(el, "loading", null, question);
 
       try {
-        const result = await checkWithBeta(text, source, text.slice(0, 200));
-        lastCheckedText = text;
+        const result = await checkWithBeta(text, source, question);
+        lastCheckedSignature = signature;
         inflightText = null;
-        upsertBadge(el, "done", result.verdict, text.slice(0, 200));
+        upsertBadge(el, "done", result.verdict, question);
       } catch (err) {
         inflightText = null;
         console.error("BETA extension check failed:", err);
-        upsertBadge(el, "error", null, null);
+        upsertBadge(el, "error", null, question);
       }
     }
 

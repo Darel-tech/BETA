@@ -1,6 +1,7 @@
 import logging
 import re
 from typing import Any
+from fastapi import HTTPException
 
 from app.adapters.llm_client import LLMClient
 from app.schemas import CorrectResponse
@@ -76,11 +77,11 @@ class CorrectionService:
                 system_prompt=CORRECTION_SYSTEM_PROMPT,
             )
         except Exception as e:
-            logger.error(f"LLM correction invocation failed: {e}")
-            return CorrectResponse(
-                corrected_answer="Error occurred during answer correction; unable to reach language model.",
-                used_facts=[],
-            )
+            logger.error("LLM correction invocation failed: %s", type(e).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Correction model is unavailable; no correction was generated.",
+            ) from None
 
         used_facts = self._extract_used_facts(raw_completion, valid_facts)
 

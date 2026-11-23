@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: Literal["development", "test", "production"] = "development"
     VERSION: str = "1.0.0"
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8003
     ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 
     # Authentication

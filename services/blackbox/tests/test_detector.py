@@ -204,12 +204,19 @@ def test_entailment_failure_propagates():
 def test_health_reports_status_without_leaking_secrets(client_factory, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-value")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     client = client_factory(None)
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["providers_configured"] == {"openai": True, "anthropic": False}
+    assert body["providers_configured"] == {
+        "openai": True,
+        "anthropic": False,
+        "groq": False,
+        "openrouter": False,
+    }
     assert "embedding" in body["models"] and "nli" in body["models"]
     assert "sk-super-secret-value" not in response.text
 
@@ -245,6 +252,13 @@ def test_claude_source_uses_anthropic_provider(client_factory):
     detector, c_fn, _ = make_detector()
     client_factory(detector).post("/detect", json=payload(source="claude"))
     assert c_fn.calls[0][1] == "anthropic"
+
+
+@pytest.mark.parametrize(("source", "provider"), [("groq", "groq"), ("openrouter", "openrouter")])
+def test_configured_provider_source_is_mapped_for_resampling(client_factory, source, provider):
+    detector, c_fn, _ = make_detector()
+    client_factory(detector).post("/detect", json=payload(source=source))
+    assert c_fn.calls[0][1] == provider
 
 
 def test_request_without_facts_returns_fallback_evidence(client_factory):

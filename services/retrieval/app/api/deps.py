@@ -5,7 +5,7 @@ from fastapi import Header, HTTPException, Request, status
 
 from app.adapters.cache import Cache, InMemoryTTLCache
 from app.adapters.embedder import Embedder, SentenceTransformerEmbedder
-from app.adapters.llm_client import HttpLLMClient, LLMClient, MockLLMClient
+from app.adapters.llm_client import HttpLLMClient, LLMClient
 from app.adapters.quantizer import Quantizer, get_quantizer
 from app.config import settings
 from app.repositories.chunk_repository import ChunkRepository
@@ -53,7 +53,7 @@ def get_cache() -> Cache:
 def get_llm_client() -> LLMClient:
     global _llm_client_instance
     if _llm_client_instance is None:
-        if settings.LLM_API_KEY:
+        if settings.LLM_API_KEY or settings.LLM_BASE_URL.rstrip("/") != "https://api.openai.com/v1":
             _llm_client_instance = HttpLLMClient(
                 base_url=settings.LLM_BASE_URL,
                 model=settings.LLM_MODEL,
@@ -62,7 +62,10 @@ def get_llm_client() -> LLMClient:
                 max_tokens=settings.LLM_MAX_TOKENS,
             )
         else:
-            _llm_client_instance = MockLLMClient()
+            raise HTTPException(
+                status_code=503,
+                detail="Correction model is not configured. Set LLM_API_KEY or configure LLM_BASE_URL.",
+            )
     return _llm_client_instance
 
 

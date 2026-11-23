@@ -89,4 +89,6 @@ class GenerateResponse(BaseModel):
     """Response body for POST /generate."""
 
     answer: str
-    latency_ms: int = Field(..., ge=0)
+    latency_ms: int = Field(..., ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)

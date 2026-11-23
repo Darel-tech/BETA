@@ -53,9 +53,9 @@ def run_migrations():
                 cur.execute(content)
                 cur.execute("INSERT INTO schema_migrations (version) VALUES (%s);", (sql_file.name,))
                 conn.commit()
-                print(f"  [✓] Applied {sql_file.name}")
+                print(f"  [OK] Applied {sql_file.name}")
 
-    print("[✓] All migrations successfully verified.")
+    print("[OK] All migrations successfully verified.")
 
 
 if __name__ == "__main__":

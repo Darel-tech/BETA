@@ -7,6 +7,8 @@ export interface GenerateOptions {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /** Skip the prompt cache so live demos show real network latency. */
+  noCache?: boolean;
 }
 
 export interface GenerateResult {

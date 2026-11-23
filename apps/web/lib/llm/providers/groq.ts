@@ -34,9 +34,11 @@ export class GroqProvider implements LLMProvider {
 
     const model = options?.model || this.getDefaultModel();
 
-    // Check cache
-    const cached = getCachedPrompt(this.name, model, prompt);
-    if (cached !== null) {
+    // Check cache. Older runs could cache an empty reasoning-only response;
+    // never reuse that as a successful answer. Live firewall calls opt out so
+    // their measured timings reflect real network calls.
+    const cached = options?.noCache ? null : getCachedPrompt(this.name, model, prompt);
+    if (cached !== null && cached.trim()) {
       return { text: cached, model, provider: this.name, cached: true };
     }
 
@@ -56,7 +58,10 @@ export class GroqProvider implements LLMProvider {
         model,
         messages: [{ role: "user", content: prompt }],
         temperature: options?.temperature ?? 0.7,
-        max_tokens: Math.min(options?.maxTokens ?? 300, 512),
+        // Reasoning models (e.g. gpt-oss) consume tokens before emitting the
+        // final message. A 512 cap can leave `content` empty and silently
+        // destroy judge output, so allow a larger ceiling.
+        max_tokens: Math.min(options?.maxTokens ?? 300, 2048),
       }),
     });
 
@@ -66,7 +71,18 @@ export class GroqProvider implements LLMProvider {
     }
 
     const data = await res.json();
-    const text = data?.choices?.[0]?.message?.content?.trim() ?? "";
+    const message = data?.choices?.[0]?.message ?? {};
+    const content = typeof message.content === "string" ? message.content.trim() : "";
+    // Fallback for reasoning-only responses: keep only the structured final
+    // lines, never raw chain-of-thought.
+    const reasoning = typeof message.reasoning === "string" ? message.reasoning : "";
+    const structured = reasoning
+      .split(/\r?\n/)
+      .filter((line: string) => /^\s*(claim|answer)\s*:/i.test(line))
+      .join("\n")
+      .trim();
+    const text = content || structured;
+    if (!text) throw new Error("Groq returned an empty response.");
     setCachedPrompt(this.name, model, prompt, text);
 
     return { text, model, provider: this.name, cached: false };

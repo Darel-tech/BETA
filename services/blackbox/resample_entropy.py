@@ -3,7 +3,7 @@
 What this computes
 ------------------
 Given a question, the module samples several answers from an external LLM
-(OpenAI/ChatGPT or Anthropic/Claude), embeds them with a sentence-transformers
+(OpenAI, Anthropic, Groq, or OpenRouter), embeds them with a sentence-transformers
 model, and returns the **mean pairwise cosine similarity** (clipped to
 ``[0, 1]``) as ``consistency_score``.
 
@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple
 
@@ -49,10 +50,19 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
-SUPPORTED_PROVIDERS: Tuple[str, ...] = (PROVIDER_OPENAI, PROVIDER_ANTHROPIC)
+PROVIDER_GROQ = "groq"
+PROVIDER_OPENROUTER = "openrouter"
+SUPPORTED_PROVIDERS: Tuple[str, ...] = (
+    PROVIDER_OPENAI,
+    PROVIDER_ANTHROPIC,
+    PROVIDER_GROQ,
+    PROVIDER_OPENROUTER,
+)
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 DEFAULT_SAMPLE_COUNT = 5
@@ -65,7 +75,12 @@ MAX_QUESTION_CHARS = 8000
 MAX_TOKENS_LIMIT = 4096
 
 #: Highest temperature each provider accepts.
-MAX_TEMPERATURE: Dict[str, float] = {PROVIDER_OPENAI: 2.0, PROVIDER_ANTHROPIC: 1.0}
+MAX_TEMPERATURE: Dict[str, float] = {
+    PROVIDER_OPENAI: 2.0,
+    PROVIDER_ANTHROPIC: 1.0,
+    PROVIDER_GROQ: 2.0,
+    PROVIDER_OPENROUTER: 2.0,
+}
 
 METHOD_DESCRIPTION = (
     "mean pairwise cosine similarity of sentence embeddings, clipped to [0, 1] "
@@ -95,7 +110,7 @@ class ConsistencyResult:
         consistency_score: Mean pairwise cosine similarity in ``[0, 1]``.
             Higher means the samples agree more. A heuristic, not a probability.
         sample_count: Number of answers used (``len(answers)``).
-        provider: ``"openai"`` or ``"anthropic"``.
+        provider: ``"openai"``, ``"anthropic"``, ``"groq"``, or ``"openrouter"``.
         model: Provider model name used for sampling.
         temperature: Sampling temperature used.
         method: Human-readable description of how the score was computed.
@@ -109,6 +124,19 @@ class ConsistencyResult:
     model: str = ""
     temperature: float = DEFAULT_TEMPERATURE
     method: str = METHOD_DESCRIPTION
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cached_input_tokens: Optional[int] = None
+
+
+class SampleBatch(list):
+    """Answers plus provider-reported usage when the SDK supplies it."""
+
+    def __init__(self, answers: Sequence[str], input_tokens: Optional[int] = None, output_tokens: Optional[int] = None, cached_input_tokens: Optional[int] = None):
+        super().__init__(answers)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cached_input_tokens = cached_input_tokens
 
 
 # --------------------------------------------------------------------------
@@ -175,18 +203,41 @@ def _env_float(name: str, default: float) -> float:
         raise ConfigurationError(f"{name} must be a number") from exc
 
 
+def _provider_timeout_seconds() -> float:
+    timeout = _env_float("BLACKBOX_PROVIDER_TIMEOUT_SECONDS", 15.0)
+    if not math.isfinite(timeout) or not 1.0 <= timeout <= 60.0:
+        raise ConfigurationError("BLACKBOX_PROVIDER_TIMEOUT_SECONDS must be between 1 and 60")
+    return timeout
+
+
 def resolve_model(provider: str, model: Optional[str] = None) -> str:
     """Return the model name to use: explicit argument, env var, or default."""
     if model and model.strip():
         return model.strip()
-    if provider == PROVIDER_OPENAI:
-        return os.environ.get("BLACKBOX_OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
-    return os.environ.get("BLACKBOX_ANTHROPIC_MODEL", "").strip() or DEFAULT_ANTHROPIC_MODEL
+    configuration = {
+        PROVIDER_OPENAI: ("BLACKBOX_OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
+        PROVIDER_ANTHROPIC: ("BLACKBOX_ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL),
+        PROVIDER_GROQ: ("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+        PROVIDER_OPENROUTER: ("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL),
+    }
+    env_name, default = configuration[provider]
+    return os.environ.get(env_name, "").strip() or default
+
+
+def is_api_key_configured(env_name: str) -> bool:
+    """Return false for empty values and common sample credentials."""
+    key = os.environ.get(env_name, "").strip()
+    normalized = key.casefold()
+    return bool(
+        key
+        and normalized not in {"changeme", "replace-me", "placeholder"}
+        and not normalized.startswith(("your-", "replace-", "placeholder"))
+    )
 
 
 def _api_key(env_name: str) -> str:
     key = os.environ.get(env_name, "").strip()
-    if not key:
+    if not is_api_key_configured(env_name):
         raise ConfigurationError(f"{env_name} is not set")
     return key
 
@@ -212,32 +263,94 @@ def make_provider_caller(
     """
     provider = _validate_provider(provider)
     model_name = resolve_model(provider, model)
-    if provider == PROVIDER_OPENAI:
-        return _openai_caller(model_name, max_tokens)
-    return _anthropic_caller(model_name, max_tokens)
+    if provider == PROVIDER_ANTHROPIC:
+        return _anthropic_caller(model_name, max_tokens)
+    return _openai_compatible_caller(provider, model_name, max_tokens)
 
 
 def _openai_caller(model_name: str, max_tokens: int) -> SampleCaller:
+    return _openai_compatible_caller(PROVIDER_OPENAI, model_name, max_tokens)
+
+
+def _openai_compatible_caller(
+    provider: str,
+    model_name: str,
+    max_tokens: int,
+) -> SampleCaller:
+    provider_config = {
+        PROVIDER_OPENAI: ("OPENAI_API_KEY", None, "OpenAI", "max_completion_tokens"),
+        PROVIDER_GROQ: ("GROQ_API_KEY", "https://api.groq.com/openai/v1", "Groq", "max_completion_tokens"),
+        PROVIDER_OPENROUTER: ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "OpenRouter", "max_tokens"),
+    }
+    key_name, base_url, label, token_limit_name = provider_config[provider]
+
     def call(question: str, n: int, temperature: float) -> Sequence[str]:
-        key = _api_key("OPENAI_API_KEY")
+        key = _api_key(key_name)
         try:
             from openai import OpenAI
         except ImportError as exc:
             raise ConfigurationError("The 'openai' package is not installed") from exc
         try:
-            client = OpenAI(api_key=key)
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": question}],
-                temperature=temperature,
-                n=n,
-                max_completion_tokens=max_tokens,
+            client_options: Dict[str, Any] = {
+                "api_key": key,
+                "timeout": _provider_timeout_seconds(),
+                "max_retries": 1,
+            }
+            if base_url:
+                client_options["base_url"] = base_url
+            client = OpenAI(**client_options)
+            request_options: Dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": question}],
+                "temperature": temperature,
+                token_limit_name: max_tokens,
+            }
+
+            def sample_one(_: int) -> tuple[str, Optional[int], Optional[int], Optional[int]]:
+                response = client.chat.completions.create(
+                    **request_options,
+                    **({"n": n} if provider == PROVIDER_OPENAI else {"n": 1}),
+                )
+                usage = getattr(response, "usage", None)
+                prompt_details = getattr(usage, "prompt_tokens_details", None)
+                answer = response.choices[0].message.content or ""
+                return (
+                    answer,
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    getattr(prompt_details, "cached_tokens", None),
+                )
+
+            # Groq supports only n=1. Issue bounded independent requests so
+            # consistency checks still receive the requested number of samples.
+            if provider == PROVIDER_OPENAI:
+                response = client.chat.completions.create(
+                    **request_options, n=n
+                )
+                usage = getattr(response, "usage", None)
+                prompt_details = getattr(usage, "prompt_tokens_details", None)
+                return SampleBatch(
+                    [choice.message.content or "" for choice in response.choices],
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    getattr(prompt_details, "cached_tokens", None),
+                )
+
+            with ThreadPoolExecutor(max_workers=min(n, 5)) as executor:
+                samples = list(executor.map(sample_one, range(n)))
+            inputs = [sample[1] for sample in samples]
+            outputs = [sample[2] for sample in samples]
+            cached = [sample[3] for sample in samples]
+            return SampleBatch(
+                [sample[0] for sample in samples],
+                sum(inputs) if all(value is not None for value in inputs) else None,
+                sum(outputs) if all(value is not None for value in outputs) else None,
+                sum(cached) if all(value is not None for value in cached) else None,
             )
-            return [choice.message.content or "" for choice in response.choices]
         except Exception as exc:  # SDK errors vary; never echo their messages.
-            logger.warning("OpenAI sampling failed: %s", type(exc).__name__)
+            logger.warning("%s sampling failed: %s", label, type(exc).__name__)
             raise ProviderError(
-                f"OpenAI request failed ({type(exc).__name__})"
+                f"{label} request failed ({type(exc).__name__})"
             ) from exc
 
     return call
@@ -251,24 +364,44 @@ def _anthropic_caller(model_name: str, max_tokens: int) -> SampleCaller:
         except ImportError as exc:
             raise ConfigurationError("The 'anthropic' package is not installed") from exc
         try:
-            client = Anthropic(api_key=key)
-            answers = []
-            # The Messages API returns one completion per request, so loop.
-            for _ in range(n):
+            client = Anthropic(
+                api_key=key,
+                timeout=_provider_timeout_seconds(),
+                max_retries=1,
+            )
+
+            def sample_one(_: int) -> tuple[str, Optional[int], Optional[int], Optional[int]]:
                 response = client.messages.create(
                     model=model_name,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     messages=[{"role": "user", "content": question}],
                 )
-                answers.append(
-                    "".join(
-                        block.text
-                        for block in response.content
-                        if getattr(block, "type", None) == "text"
-                    )
+                answer = "".join(
+                    block.text
+                    for block in response.content
+                    if getattr(block, "type", None) == "text"
                 )
-            return answers
+                usage = getattr(response, "usage", None)
+                cache_read = getattr(usage, "cache_read_input_tokens", None)
+                cache_write = getattr(usage, "cache_creation_input_tokens", None)
+                cached = cache_read + cache_write if cache_read is not None and cache_write is not None else None
+                return answer, getattr(usage, "input_tokens", None), getattr(usage, "output_tokens", None), cached
+
+            # Anthropic's Messages API returns one completion per request.
+            # Independent resamples run concurrently, bounded to the normal
+            # five-sample workload to avoid an unbounded request burst.
+            with ThreadPoolExecutor(max_workers=min(n, 5)) as executor:
+                samples = list(executor.map(sample_one, range(n)))
+            inputs = [sample[1] for sample in samples]
+            outputs = [sample[2] for sample in samples]
+            cached = [sample[3] for sample in samples]
+            return SampleBatch(
+                [sample[0] for sample in samples],
+                sum(inputs) if all(value is not None for value in inputs) else None,
+                sum(outputs) if all(value is not None for value in outputs) else None,
+                sum(cached) if all(value is not None for value in cached) else None,
+            )
         except Exception as exc:
             logger.warning("Anthropic sampling failed: %s", type(exc).__name__)
             raise ProviderError(
@@ -328,12 +461,15 @@ def sample_answers(
 
     if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
         raise ProviderError("Provider returned an unexpected response shape")
+    input_tokens = getattr(raw, "input_tokens", None)
+    output_tokens = getattr(raw, "output_tokens", None)
+    cached_input_tokens = getattr(raw, "cached_input_tokens", None)
     answers = [a.strip() for a in raw if isinstance(a, str) and a.strip()]
     if len(answers) < MIN_SAMPLES:
         raise ProviderError(
             f"Provider returned fewer than {MIN_SAMPLES} usable answers"
         )
-    return answers[:n]
+    return SampleBatch(answers[:n], input_tokens, output_tokens, cached_input_tokens)
 
 
 # --------------------------------------------------------------------------
@@ -472,4 +608,7 @@ def measure_consistency(
         provider=provider,
         model=resolve_model(provider, model),
         temperature=float(temperature),
+        input_tokens=getattr(answers, "input_tokens", None),
+        output_tokens=getattr(answers, "output_tokens", None),
+        cached_input_tokens=getattr(answers, "cached_input_tokens", None),
     )

@@ -30,15 +30,22 @@ def get_embedder(model_name: str = DEFAULT_EMBEDDING_MODEL):
 
 def fetch_wikipedia_corpus(limit: int = 2000) -> list[dict[str, str]]:
     """
-    Load a real Wikipedia topic subset using datasets or fallback curated dataset.
-    Minimum 2,000 real encyclopedic passages.
+    Load a real Wikipedia subset. Fail closed rather than silently substituting
+    a small curated/demo corpus for the requested dataset.
     """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+
     passages: list[dict[str, str]] = []
     try:
         from datasets import load_dataset
         print(f"[*] Fetching Wikipedia dataset subset (target: {limit} passages)...")
         # Load a streaming or standard slice of wikimedia/wikipedia or wiki_summary
         ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
+        # The unshuffled stream is title-ordered and over-represents the first
+        # alphabetic articles. A bounded shuffle gives this general-knowledge
+        # index broader topic coverage without downloading the full corpus.
+        ds = ds.shuffle(seed=2026, buffer_size=10_000)
         count = 0
         for item in ds:
             text = item.get("text", "").strip()
@@ -58,13 +65,12 @@ def fetch_wikipedia_corpus(limit: int = 2000) -> list[dict[str, str]]:
                     break
             if count >= limit:
                 break
-        print(f"[✓] Retrieved {len(passages)} passages from Wikipedia dataset stream.")
+        print(f"[OK] Retrieved {len(passages)} passages from Wikipedia dataset stream.")
     except Exception as exc:
-        print(f"[!] Hugging Face datasets stream unavailable ({exc}). Using rich built-in curated encyclopedia seed corpus.")
-        # Curated diverse encyclopedia & science corpus for MVP when external dataset download is restricted
-        from app.services.constants import SEED_ENCYCLOPEDIA_CHUNKS if hasattr(__import__("app.services.constants", fromlist=["SEED_ENCYCLOPEDIA_CHUNKS"]), "SEED_ENCYCLOPEDIA_CHUNKS") else []
-        passages = SEED_ENCYCLOPEDIA_CHUNKS if 'SEED_ENCYCLOPEDIA_CHUNKS' in locals() else []
-        
+        raise RuntimeError("Could not load the requested Wikipedia dataset; no chunks were ingested.") from exc
+
+    if len(passages) < limit:
+        raise RuntimeError(f"Wikipedia stream returned only {len(passages)} of {limit} requested passages.")
     return passages
 
 
@@ -108,7 +114,7 @@ async def ingest_corpus(passages: list[dict[str, str]], batch_size: int = 64, qu
             print(f"  Batch {i // batch_size + 1}/{(len(passages) + batch_size - 1) // batch_size}: inserted {inserted} chunks.")
 
         count = await repo.count_chunks()
-        print(f"[✓] Knowledge ingestion complete. Total rows in knowledge_chunks: {count}")
+        print(f"[OK] Knowledge ingestion complete. Total rows in knowledge_chunks: {count}")
     finally:
         await close_db_pool()
 
@@ -120,7 +126,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     corpus = fetch_wikipedia_corpus(limit=args.count)
-    if corpus:
-        asyncio.run(ingest_corpus(corpus, batch_size=args.batch_size))
-    else:
-        print("[*] Ingestion pipeline prepared and ready for dataset input.")
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(ingest_corpus(corpus, batch_size=args.batch_size))

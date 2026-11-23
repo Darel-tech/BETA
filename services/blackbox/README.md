@@ -1,6 +1,6 @@
 # Black-Box Hallucination Detector
 
-Component of **Hallucination Firewall**. It evaluates an answer from an external LLM (ChatGPT or Claude) **without** access to model weights or activations, by combining two signals into an explainable verdict.
+Component of **Hallucination Firewall**. It evaluates an answer from Groq, OpenRouter, OpenAI, or Anthropic **without** access to model weights or activations, by combining two signals into an explainable verdict.
 
 > Status: standalone component, implemented and unit-tested with mocks. Detection accuracy has **not** been evaluated, and no knowledge-retrieval service, dashboard, or white-box SAE detector is integrated.
 
@@ -20,7 +20,7 @@ POST /detect | /v1/check
    app.py (Pydantic validation, runs pipeline in a worker thread)
         |
    detector.py  Detector.detect()
-        |-- question given? --> resample_entropy.py: sample N answers (OpenAI/Anthropic SDK)
+        |-- question given? --> resample_entropy.py: sample N answers (OpenAI-compatible or Anthropic SDK)
         |                       + sentence-transformers embeddings -> consistency_score
         |-- facts given?    --> entailment_check.py: NLI(fact, claim) per fact -> aggregate
         v
@@ -29,7 +29,7 @@ POST /detect | /v1/check
 
 Files: `errors.py` (shared exceptions) and `detector.py` (pipeline) are small supporting modules: the first prevents circular imports, the second keeps `app.py` thin and the pipeline testable without HTTP.
 
-`source` maps to the resampling provider: `chatgpt` -> OpenAI, `claude` -> Anthropic.
+`source` maps to the resampling provider: `chatgpt` -> OpenAI, `claude` -> Anthropic, `groq` -> Groq, and `openrouter` -> OpenRouter.
 
 **Missing inputs.** `question` absent -> resampling is skipped (stated in the evidence). `reference_facts` absent or all blank -> fact verification is reported as unavailable and the verdict falls back cautiously to consistency, with confidence capped. At least one of the two must be present (otherwise HTTP 422). `entities` is accepted for contract compatibility but not used in scoring.
 
@@ -58,17 +58,17 @@ cp services/blackbox/.env.example services/blackbox/.env   # then edit
 
 ### Environment variables
 
-See `.env.example`. Required for live use: `OPENAI_API_KEY` (for `source: chatgpt` with a question) and/or `ANTHROPIC_API_KEY` (for `source: claude` with a question). Keys are read only from the environment and are never logged or returned. Everything else has a default.
+See `.env.example`. Configure the credential for each provider you enable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, and/or `OPENROUTER_API_KEY`. Groq and OpenRouter use the OpenAI-compatible chat completions API. Keys are read only from the environment and are never logged or returned. Model names can be set with `BLACKBOX_OPENAI_MODEL`, `BLACKBOX_ANTHROPIC_MODEL`, `GROQ_MODEL`, and `OPENROUTER_MODEL`.
 
 ## Run the service
 
 From the repository root:
 
 ```bash
-uvicorn services.blackbox.app:app --port 8000 --env-file services/blackbox/.env
+uvicorn services.blackbox.app:app --host 0.0.0.0 --port 8002 --env-file services/blackbox/.env
 ```
 
-Interactive docs: http://localhost:8000/docs
+Interactive docs: http://localhost:8002/docs
 
 Docker (build context is the repository root; secrets are passed at runtime):
 
@@ -125,7 +125,7 @@ python -m pytest services/blackbox/tests -v
 | `sentence-transformers/all-MiniLM-L6-v2` | embeddings | ~90 MB |
 | `cross-encoder/nli-deberta-v3-small` | NLI | ~570 MB |
 
-Downloaded from Hugging Face on first use into `HF_HOME` (default `~/.cache/huggingface`) and cached in-process afterwards. PyTorch itself adds a large install. CPU is sufficient; first request is slow because of loading. Each question-bearing request makes `BLACKBOX_SAMPLE_COUNT` provider calls (Anthropic: one request per sample), so it costs money and takes seconds.
+Downloaded from Hugging Face on first use into `HF_HOME` (default `~/.cache/huggingface`) and cached in-process afterwards. PyTorch itself adds a large install. CPU is sufficient; first request is slow because of loading. Each question-bearing request resamples `BLACKBOX_SAMPLE_COUNT` answers from the selected provider.
 
 ## Limitations
 
