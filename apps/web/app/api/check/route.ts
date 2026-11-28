@@ -10,9 +10,11 @@
  * - Every response declares `mode` so the UI can label the pipeline honestly.
  */
 
-import { after, NextResponse } from "next/server";
+import { after, NextResponse, NextRequest } from "next/server";
 import { logCheckRun } from "@/lib/telemetry";
 import { verifyGenerationUsageProof } from "@/lib/telemetry/usage-proof";
+import { getSession } from "@/lib/auth/middleware";
+import { logQueryCheck } from "@/lib/audit";
 import {
   activeDetector,
   isPromptEcho,
@@ -57,7 +59,8 @@ function tokenCount(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : null;
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  const session = await getSession(request);
   const requestStartedAt = Date.now();
   let body: unknown;
   try {
@@ -129,6 +132,17 @@ export async function POST(request: Request) {
         latencyMs: Date.now() - requestStartedAt,
         stages: result.stages,
       }));
+      await logQueryCheck({
+        userId: session ? Number(session.sub) : null,
+        question: String(question),
+        sourceModel: source,
+        verdict: result.verdict,
+        confidence: result.confidence,
+        evidenceCount: (result.evidence ?? []).length,
+        latencyMs: Date.now() - requestStartedAt,
+        wasCorrected: result.verdict !== "trustworthy" && !!result.corrected_answer,
+        correctedAnswer: result.corrected_answer,
+      });
       return NextResponse.json(response);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Verification failed.";
@@ -245,6 +259,18 @@ export async function POST(request: Request) {
     latencyMs: Date.now() - requestStartedAt,
     stages,
   }));
+
+  await logQueryCheck({
+    userId: session ? Number(session.sub) : null,
+    question: String(question),
+    sourceModel: source,
+    verdict,
+    confidence: detectorData.confidence,
+    evidenceCount: evidence.length,
+    latencyMs: Date.now() - requestStartedAt,
+    wasCorrected: verdict !== "trustworthy" && !!correctedAnswer,
+    correctedAnswer,
+  });
 
   return NextResponse.json({
     verdict,

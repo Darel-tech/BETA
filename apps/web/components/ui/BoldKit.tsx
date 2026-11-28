@@ -9,6 +9,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { ProfileMenu } from "@/components/ui/ProfileMenu";
 
 export type BkTone =
   | "brand"
@@ -83,7 +84,8 @@ export function BkNav({ active }: { active: "chat" | "compare" | "dashboard" | "
         />
         BETA
       </Link>
-      <div className="bk-nav-links">
+      <div className="bk-nav-links flex items-center">
+        <ProfileMenu />
         {links.map((link) => (
           <Link
             key={link.key}

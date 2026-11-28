@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed:admin": "node scripts/seed-admin.mjs"
   },
   "dependencies": {
     "@neon/realtime": "^0.2.1",
@@ -14,11 +15,17 @@
     "@neondatabase/serverless": "^1.2.1",
     "next": "16.4.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "sqlite3": "^5.1.7",
+    "bcryptjs": "^2.4.3",
+    "jose": "^5.9.6",
+    "nodemailer": "^6.9.14"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
+    "@types/nodemailer": "^6.4.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
