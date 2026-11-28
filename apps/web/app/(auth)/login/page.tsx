@@ -41,8 +41,14 @@ export default function LoginPage() {
     <div className="bk-app flex items-center justify-center p-4">
       <BkCard tone="brand" className="relative w-full max-w-sm p-8 text-center">
         <div className="flex flex-col items-center mb-6">
-          <div className="bk-frame mb-4 grid h-16 w-16 place-items-center bg-[var(--bk-brand)] text-white">
-            <span className="text-2xl font-black tracking-tighter">β</span>
+          <div className="bk-frame mb-4 grid h-16 w-16 place-items-center overflow-hidden bg-white">
+            <img
+              src="/beta-mark.png"
+              alt="BETA logo"
+              width={64}
+              height={64}
+              className="h-full w-full object-contain"
+            />
           </div>
           <h1 className="text-2xl font-black tracking-tight text-[var(--bk-ink)]">
             {COPY.auth.welcomeBack}

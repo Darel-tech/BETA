@@ -73,7 +73,15 @@ export function BkNav({ active }: { active: "chat" | "compare" | "dashboard" | "
   return (
     <nav className="bk-nav" aria-label="Primary navigation">
       <Link href="/" className="bk-brand bk-press">
-        β BETA
+        <img
+          src="/beta-mark.png"
+          alt=""
+          width={26}
+          height={26}
+          className="bk-brand-mark"
+          aria-hidden="true"
+        />
+        BETA
       </Link>
       <div className="bk-nav-links">
         {links.map((link) => (

@@ -789,7 +789,9 @@ export default function ChatPage() {
         <div className="grid items-start gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_18rem]">
           <aside className={styles.sidebar} aria-label="Chat navigation">
         <div className={styles.brandRow}>
-          <div className={styles.brandMark}>β</div>
+          <div className={styles.brandMark}>
+            <img src="/beta-mark.png" alt="" width={36} height={36} aria-hidden="true" />
+          </div>
           <div>
             <div className={styles.brandName}>BETA</div>
             <div className={styles.brandSub}>Firewall workspace</div>
@@ -889,7 +891,9 @@ export default function ChatPage() {
 
             return (
               <div key={message.id} className={styles.rowAssistant}>
-                <div className={styles.avatar} aria-hidden="true">β</div>
+                <div className={styles.avatar} aria-hidden="true">
+                  <img src="/beta-mark.png" alt="" width={32} height={32} aria-hidden="true" />
+                </div>
                 <div className={styles.assistantBody}>
                   <div className={styles.bubbleAssistant}>
                     <div className={message.content ? "" : styles.draftText}>
@@ -1028,7 +1032,9 @@ export default function ChatPage() {
 
           {loading && (
             <div className={styles.rowAssistant} aria-live="polite">
-              <div className={styles.avatar} aria-hidden="true">β</div>
+              <div className={styles.avatar} aria-hidden="true">
+                <img src="/beta-mark.png" alt="" width={32} height={32} aria-hidden="true" />
+              </div>
               <div className={styles.bubbleAssistant}>
                 <span className={styles.draftText}>Pipeline is running…</span>
               </div>

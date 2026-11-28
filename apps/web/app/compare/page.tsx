@@ -897,9 +897,16 @@ function CompareContent() {
         {!loading && !data && !error && (
           <div className={cx(bkDarkFrame, "py-24 text-center")}>
             <div
-              className="mx-auto mb-5 flex h-14 w-14 items-center justify-center border-[3px] border-[var(--bk-line)] bg-[var(--bk-brand)] text-2xl text-white shadow-[4px_4px_0_0_var(--bk-shadow)]"
+              className="mx-auto mb-5 flex h-14 w-14 items-center justify-center overflow-hidden border-[3px] border-[var(--bk-line)] bg-white shadow-[4px_4px_0_0_var(--bk-shadow)]"
             >
-              🛡️
+              <img
+                src="/beta-mark.png"
+                alt=""
+                width={56}
+                height={56}
+                className="h-full w-full object-contain"
+                aria-hidden="true"
+              />
             </div>
             <p className="mb-2 text-lg font-black uppercase tracking-wide text-[var(--bk-ink)]">
               Enter a question above to begin.

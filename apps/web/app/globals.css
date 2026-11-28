@@ -381,14 +381,23 @@ body {
 .bk-brand {
   display: inline-flex;
   align-items: center;
+  gap: 0.4rem;
   border: 3px solid var(--bk-line);
-  background: var(--bk-brand);
-  color: #fff;
+  background: #fff;
+  color: var(--bk-ink);
   padding: 0.3rem 0.7rem;
   font-weight: 900;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   box-shadow: 3px 3px 0 var(--bk-shadow);
+}
+
+.bk-brand-mark {
+  display: block;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 
 .bk-nav-links {

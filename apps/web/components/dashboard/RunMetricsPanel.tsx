@@ -520,11 +520,15 @@ function EmptyState() {
         <div className="absolute inset-0 border border-[var(--bk-line)]" />
         <div className="absolute inset-3 border border-[var(--bk-brand)]" />
         <div className="absolute inset-0 grid place-items-center">
-          <div className="bk-frame grid h-12 w-12 place-items-center bg-[var(--bk-brand)] text-white">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-              <path d="M12 3 5 6v5c0 4.4 2.9 8.3 7 10 4.1-1.7 7-5.6 7-10V6l-7-3Z" strokeLinejoin="round" />
-              <path d="m9 12 2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+          <div className="bk-frame grid h-12 w-12 place-items-center overflow-hidden bg-white">
+            <img
+              src="/beta-mark.png"
+              alt=""
+              width={48}
+              height={48}
+              className="h-full w-full object-contain"
+              aria-hidden="true"
+            />
           </div>
         </div>
         <span className="absolute right-0 top-4 h-2.5 w-2.5 border-[2px] border-[var(--bk-line)] bg-[var(--bk-evidence)]" />
